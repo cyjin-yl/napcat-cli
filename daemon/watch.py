@@ -128,56 +128,274 @@ class EventProcessor:
         notice_type = event.get("notice_type", "")
         sub_type = event.get("sub_type", "")
 
+        # --- notify events (poke, profile_like, lucky_king) ---
         if notice_type == "notify":
-            if sub_type == "poke":
-                sender_id = str(event.get("user_id", ""))
-                group_id = event.get("group_id", "")
-                self.writer.write_alert("NAPCAT_CLI_NEW_POKE", {
-                    "summary": f"Poke from {sender_id}{' in group ' + str(group_id) if group_id else ''}",
-                    "sender_id": sender_id,
-                    "target_id": str(event.get("target_id", "")),
-                    "group_id": str(group_id) if group_id else "",
-                })
+            self._handle_notify(event, sub_type)
+            return
+
+        # --- group events ---
+        if notice_type == "group_admin":
+            self._handle_group_admin(event)
+            return
+        if notice_type == "group_ban":
+            self._handle_group_ban(event)
+            return
+        if notice_type == "group_decrease":
+            self._handle_group_decrease(event, sub_type)
+            return
+        if notice_type == "group_increase":
+            self._handle_group_increase(event, sub_type)
+            return
+        if notice_type == "group_upload":
+            self._handle_group_upload(event)
+            return
+        if notice_type == "group_recall":
+            self._handle_group_recall(event)
+            return
+        if notice_type == "group_card":
+            self._handle_group_card(event)
+            return
+        if notice_type == "group_msg_emoji_like":
+            self._handle_group_emoji_like(event)
+            return
+
+        # --- friend events ---
+        if notice_type == "friend_add":
+            self._handle_friend_add(event)
+            return
+        if notice_type == "friend_recall":
+            self._handle_friend_recall(event)
+            return
+
+        # --- catch-all for unknown notice types ---
+        self.writer.write_alert("NAPCAT_CLI_NOTICE", {
+            "summary": f"Notice: {notice_type}/{sub_type}",
+            "notice_type": notice_type,
+            "sub_type": sub_type,
+        })
+
+    # ---- notify sub-handlers ----
+
+    def _handle_notify(self, event: dict, sub_type: str) -> None:
+        if sub_type == "poke":
+            sender_id = str(event.get("user_id", ""))
+            group_id = event.get("group_id", "")
+            target_id = str(event.get("target_id", ""))
+            self.writer.write_alert("NAPCAT_CLI_NEW_POKE", {
+                "summary": f"Poke from {sender_id}{' in group ' + str(group_id) if group_id else ''}",
+                "sender_id": sender_id,
+                "target_id": target_id,
+                "group_id": str(group_id) if group_id else "",
+            })
+            # Wake if bot was poked
+            if self.self_id and target_id == self.self_id:
                 self._wake("NEW_POKE")
-            elif sub_type == "lucky_king":
-                self.writer.write_alert("NAPCAT_CLI_NEW_POKE", {
-                    "summary": "Lucky king (red packet)",
-                    "group_id": str(event.get("group_id", "")),
-                    "user_id": str(event.get("user_id", "")),
-                })
-        elif notice_type == "group_upload":
-            self.writer.write_alert("NAPCAT_CLI_NEW_MESSAGE", {
-                "summary": f"File uploaded by {event.get('user_id')} in group {event.get('group_id')}",
-                "type": "group_upload",
+        elif sub_type == "lucky_king":
+            self.writer.write_alert("NAPCAT_CLI_NEW_POKE", {
+                "summary": "Lucky king (red packet)",
                 "group_id": str(event.get("group_id", "")),
+                "user_id": str(event.get("user_id", "")),
             })
-        elif notice_type in ("friend_add", "group_recall", "group_card"):
-            self.writer.write_alert("NAPCAT_CLI_NEW_MESSAGE", {
-                "summary": f"{notice_type}: {event}",
-                "type": notice_type,
+        elif sub_type == "profile_like":
+            operator_id = str(event.get("operator_id", ""))
+            operator_nick = event.get("operator_nick", "")
+            times = event.get("times", 0)
+            self.writer.write_alert("NAPCAT_CLI_NEW_POKE", {
+                "summary": f"{operator_nick}({operator_id}) liked profile {times} times",
+                "operator_id": operator_id,
+                "operator_nick": operator_nick,
+                "times": times,
+                "sub_type": "profile_like",
             })
+            self._wake("PROFILE_LIKE")
+
+    # ---- group sub-handlers ----
+
+    def _handle_group_admin(self, event: dict) -> None:
+        sub = event.get("sub_type", "")
+        user_id = str(event.get("user_id", ""))
+        group_id = str(event.get("group_id", ""))
+        action = "promoted" if sub == "set" else "demoted"
+        self.writer.write_alert("NAPCAT_CLI_NOTICE", {
+            "summary": f"Admin {action}: {user_id} in group {group_id}",
+            "notice_type": "group_admin",
+            "sub_type": sub,
+            "user_id": user_id,
+            "group_id": group_id,
+        })
+        # Wake if bot's admin status changed
+        if self.self_id and user_id == self.self_id:
+            self._wake("GROUP_ADMIN_CHANGE")
+
+    def _handle_group_ban(self, event: dict) -> None:
+        sub = event.get("sub_type", "")
+        user_id = str(event.get("user_id", ""))
+        group_id = str(event.get("group_id", ""))
+        operator_id = str(event.get("operator_id", ""))
+        duration = event.get("duration", 0)
+        action = "banned" if sub == "ban" else "unbanned"
+        self.writer.write_alert("NAPCAT_CLI_NOTICE", {
+            "summary": f"{user_id} {action} in group {group_id} by {operator_id} ({duration}s)",
+            "notice_type": "group_ban",
+            "sub_type": sub,
+            "user_id": user_id,
+            "group_id": group_id,
+            "operator_id": operator_id,
+            "duration": duration,
+        })
+        # Wake if bot was banned
+        if self.self_id and user_id == self.self_id and sub == "ban":
+            self._wake("BOT_BANNED")
+
+    def _handle_group_decrease(self, event: dict, sub_type: str) -> None:
+        user_id = str(event.get("user_id", ""))
+        group_id = str(event.get("group_id", ""))
+        operator_id = str(event.get("operator_id", ""))
+        self.writer.write_alert("NAPCAT_CLI_NOTICE", {
+            "summary": f"Member {user_id} left group {group_id} ({sub_type}) by {operator_id}",
+            "notice_type": "group_decrease",
+            "sub_type": sub_type,
+            "user_id": user_id,
+            "group_id": group_id,
+            "operator_id": operator_id,
+        })
+        # Wake if bot was kicked
+        if sub_type == "kick_me" and self.self_id:
+            self._wake("BOT_KICKED_FROM_GROUP")
+        elif sub_type == "disband":
+            self._wake("GROUP_DISBANDED")
+
+    def _handle_group_increase(self, event: dict, sub_type: str) -> None:
+        user_id = str(event.get("user_id", ""))
+        group_id = str(event.get("group_id", ""))
+        operator_id = str(event.get("operator_id", ""))
+        self.writer.write_alert("NAPCAT_CLI_NOTICE", {
+            "summary": f"New member {user_id} joined group {group_id} ({sub_type}) by {operator_id}",
+            "notice_type": "group_increase",
+            "sub_type": sub_type,
+            "user_id": user_id,
+            "group_id": group_id,
+            "operator_id": operator_id,
+        })
+        self._wake("NEW_GROUP_MEMBER")
+
+    def _handle_group_upload(self, event: dict) -> None:
+        file_info = event.get("file", {})
+        self.writer.write_alert("NAPCAT_CLI_NOTICE", {
+            "summary": f"File uploaded by {event.get('user_id')} in group {event.get('group_id')}: {file_info.get('name', '?')}",
+            "notice_type": "group_upload",
+            "group_id": str(event.get("group_id", "")),
+            "user_id": str(event.get("user_id", "")),
+            "file_name": file_info.get("name", ""),
+            "file_id": file_info.get("id", ""),
+            "file_size": file_info.get("size", 0),
+        })
+
+    def _handle_group_recall(self, event: dict) -> None:
+        user_id = str(event.get("user_id", ""))
+        operator_id = str(event.get("operator_id", ""))
+        group_id = str(event.get("group_id", ""))
+        msg_id = str(event.get("message_id", ""))
+        self.writer.write_alert("NAPCAT_CLI_NOTICE", {
+            "summary": f"Message {msg_id} recalled in group {group_id} by {operator_id} (sender: {user_id})",
+            "notice_type": "group_recall",
+            "group_id": group_id,
+            "user_id": user_id,
+            "operator_id": operator_id,
+            "message_id": msg_id,
+        })
+        # Wake if bot's own message was recalled
+        if self.self_id and user_id == self.self_id:
+            self._wake("MY_MESSAGE_RECALLED")
+
+    def _handle_group_card(self, event: dict) -> None:
+        user_id = str(event.get("user_id", ""))
+        group_id = str(event.get("group_id", ""))
+        card_new = event.get("card_new", "")
+        card_old = event.get("card_old", "")
+        self.writer.write_alert("NAPCAT_CLI_NOTICE", {
+            "summary": f"Card changed for {user_id} in group {group_id}: '{card_old}' → '{card_new}'",
+            "notice_type": "group_card",
+            "group_id": group_id,
+            "user_id": user_id,
+            "card_old": card_old,
+            "card_new": card_new,
+        })
+
+    def _handle_group_emoji_like(self, event: dict) -> None:
+        user_id = str(event.get("user_id", ""))
+        group_id = str(event.get("group_id", ""))
+        msg_id = str(event.get("message_id", ""))
+        likes = event.get("likes", [])
+        emoji_ids = [l.get("emoji_id", "") for l in likes]
+        is_add = event.get("is_add", True)
+        action = "reacted" if is_add else "removed reaction from"
+        self.writer.write_alert("NAPCAT_CLI_NOTICE", {
+            "summary": f"{user_id} {action} message {msg_id} with {emoji_ids}",
+            "notice_type": "group_msg_emoji_like",
+            "group_id": group_id,
+            "user_id": user_id,
+            "message_id": msg_id,
+            "likes": likes,
+            "is_add": is_add,
+        })
+
+    # ---- friend sub-handlers ----
+
+    def _handle_friend_add(self, event: dict) -> None:
+        user_id = str(event.get("user_id", ""))
+        self.writer.write_alert("NAPCAT_CLI_NEW_REQUEST", {
+            "summary": f"New friend added: {user_id}",
+            "notice_type": "friend_add",
+            "user_id": user_id,
+        })
+        self._wake("NEW_FRIEND")
+
+    def _handle_friend_recall(self, event: dict) -> None:
+        user_id = str(event.get("user_id", ""))
+        msg_id = str(event.get("message_id", ""))
+        self.writer.write_alert("NAPCAT_CLI_NOTICE", {
+            "summary": f"Friend {user_id} recalled message {msg_id}",
+            "notice_type": "friend_recall",
+            "user_id": user_id,
+            "message_id": msg_id,
+        })
 
     def _handle_request(self, event: dict) -> None:
         req_type = event.get("request_type", "")
+        sub_type = event.get("sub_type", "")
         flag = event.get("flag", "")
         user_id = str(event.get("user_id", ""))
         comment = event.get("comment", "")
-        alert_data = {
+        alert_data: dict[str, Any] = {
             "summary": f"{req_type} request from {user_id}: {comment[:30]}",
             "request_type": req_type,
+            "sub_type": sub_type,
             "user_id": user_id,
             "flag": flag,
             "comment": comment,
         }
         if req_type == "group":
             alert_data["group_id"] = str(event.get("group_id", ""))
+            alert_data["summary"] = f"{req_type} {sub_type} request from {user_id} to group {event.get('group_id', '?')}: {comment[:30]}"
         self.writer.write_alert("NAPCAT_CLI_NEW_REQUEST", alert_data)
         self._wake("NEW_REQUEST")
 
     def _handle_meta(self, event: dict) -> None:
         sub_type = event.get("sub_type", "")
         if sub_type == "lifespan":
-            self.log(f"Connection status: {event.get('status', '')}")
+            status = event.get("status", "")
+            self.log(f"Connection status: {status}")
+            if status in ("down", "offline"):
+                self.writer.write_alert("NAPCAT_CLI_NOTICE", {
+                    "summary": "Bot connection lost",
+                    "meta_type": "lifespan",
+                    "status": status,
+                })
+                self._wake("BOT_OFFLINE")
+        elif sub_type == "heartbeat":
+            interval = event.get("interval", 0)
+            self.log(f"Heartbeat ({interval}s)")
 
     def _wake(self, reason: str) -> None:
         self.writer.write_alert("NAPCAT_CLI_NEED_WAKE_UP", {
