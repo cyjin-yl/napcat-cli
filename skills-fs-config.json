@@ -5,7 +5,7 @@
       "url": "http://127.0.0.1:18821/invoke"
     }
   ],
-  "skillsRoot": "/home/ezra/.hermes/skills",
+  "skillsRoot": "$HOME/.hermes/skills",
   "includes": [
     "skills-fs-fragment.json"
   ]
