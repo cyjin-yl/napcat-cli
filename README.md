@@ -260,7 +260,7 @@ Example minimal config snippet:
   "providers": [
     { "id": "napcat", "url": "http://127.0.0.1:18821/invoke" }
   ],
-  "skillsRoot": "/home/ezra/.hermes/skills",
+  "skillsRoot": "$HOME/.hermes/skills",
   "skills": [
     {
       "name": "napcat-cli",
