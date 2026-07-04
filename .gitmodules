@@ -1,0 +1,3 @@
+[submodule "skills-fs"]
+	path = skills-fs
+	url = /tmp/skills-fs

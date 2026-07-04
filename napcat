@@ -1,0 +1,630 @@
+#!/usr/bin/env python3
+"""napcat-cli - Standalone CLI for NapCat QQ bot management.
+
+Usage:
+    napcat api <endpoint> [--data JSON] [--method POST|GET]
+    napcat send <group|private> <id> <message> [--file FILE] [--at USERS]
+    napcat recall <message_id> [--group GROUP]
+    napcat group <command> [args...]
+    napcat friend <command> [args...]
+    napcat file <command> [args...]
+    napcat daemon [start|stop|status]
+    napcat config [get|set] <key> [value]
+    napcat events [--type TYPE] [--since TIMESTAMP] [--limit N]
+    napcat alerts [--clear]
+
+Environment:
+    NAPCAT_API_URL  HTTP API URL (default: http://127.0.0.1:18801)
+    NAPCAT_DATA_DIR Data directory (default: ~/.napcat-data)
+    NAPCAT_TOKEN    API authentication token
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+
+# Project root
+ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT))
+
+from lib.api import NapCatAPI
+from lib.config import get_config, DATA_DIR
+from lib.events import EventsReader
+
+
+def cmd_api(args: argparse.Namespace, api: NapCatAPI) -> int:
+    """napcat api - Raw API access like 'gh api'."""
+    endpoint = args.endpoint
+    method = args.method or ("POST" if args.data else "GET")
+
+    data: dict | None = None
+    if args.data:
+        try:
+            data = json.loads(args.data)
+        except json.JSONDecodeError as e:
+            print(f"Error: Invalid JSON: {e}", file=sys.stderr)
+            return 1
+
+    result = api.request(endpoint, method=method, json_body=data)
+
+    if args.output == "json":
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+    elif args.output == "value" and "data" in result:
+        val = result["data"]
+        if isinstance(val, (dict, list)):
+            print(json.dumps(val, indent=2, ensure_ascii=False))
+        else:
+            print(val)
+    else:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+
+    return 0 if result.get("retcode") == 0 or result.get("status") == "ok" else 1
+
+
+def cmd_send(args: argparse.Namespace, api: NapCatAPI) -> int:
+    """napcat send - Send a message."""
+    msg_type = "group" if args.target_type == "group" else "private"
+    target_id = args.target_id
+
+    # Build message segments
+    segments = []
+    if args.at:
+        for uid in args.at:
+            segments.append({"type": "at", "data": {"qq": uid}})
+
+    if args.file:
+        segments.append({"type": "file", "data": {"file": args.file, "name": Path(args.file).name}})
+    elif args.image:
+        segments.append({"type": "image", "data": {"file": args.image}})
+
+    # Text message
+    segments.append({"type": "text", "data": {"text": args.message}})
+
+    kwargs: dict = {"message_type": msg_type, "message": segments}
+    if msg_type == "group":
+        kwargs["group_id"] = target_id
+    else:
+        kwargs["user_id"] = target_id
+
+    result = api.call("send_msg", **kwargs)
+
+    if result.get("retcode") == 0:
+        data = result.get("data", {})
+        msg_id = data.get("message_id", "unknown")
+        print(f"Sent message_id={msg_id}", file=sys.stderr)
+        return 0
+    else:
+        print(f"Error: {result.get('message', 'Unknown error')}", file=sys.stderr)
+        return 1
+
+
+def cmd_recall(args: argparse.Namespace, api: NapCatAPI) -> int:
+    """napcat recall - Recall a message."""
+    kwargs: dict = {"message_id": args.message_id}
+    if args.group:
+        kwargs["group_id"] = args.group
+
+    result = api.call("delete_msg", **kwargs)
+
+    if result.get("retcode") == 0:
+        print("Message recalled successfully", file=sys.stderr)
+        return 0
+    else:
+        print(f"Error: {result.get('message', result)}", file=sys.stderr)
+        return 1
+
+
+def cmd_group(args: argparse.Namespace, api: NapCatAPI) -> int:
+    """napcat group - Group management."""
+    sub = args.subcommand
+
+    if sub == "info":
+        result = api.call("get_group_info", group_id=args.group_id, no_cache=args.no_cache)
+    elif sub == "members":
+        result = api.call("get_group_member_list", group_id=args.group_id, no_cache=args.no_cache)
+    elif sub == "member":
+        result = api.call("get_group_member_info", group_id=args.group_id, user_id=args.user_id, no_cache=args.no_cache)
+    elif sub == "mute":
+        secs = args.duration or 30 * 60
+        result = api.call("set_group_ban", group_id=args.group_id, user_id=args.user_id, duration=secs)
+    elif sub == "unmute":
+        result = api.call("set_group_ban", group_id=args.group_id, user_id=args.user_id, duration=0)
+    elif sub == "kick":
+        kwargs: dict = {"group_id": args.group_id, "user_id": args.user_id}
+        if hasattr(args, 'reject'):
+            kwargs["reject_add_request"] = True
+        result = api.call("set_group_kick", **kwargs)
+    elif sub == "admin":
+        result = api.call("set_group_admin", group_id=args.group_id, user_id=args.user_id, enable=args.enable)
+    elif sub == "rename":
+        result = api.call("set_group_card", group_id=args.group_id, user_id=args.user_id, card=args.card)
+    elif sub == "remark":
+        result = api.call("set_group_remark", group_id=args.group_id, remark=args.remark)
+    elif sub == "announce":
+        result = api.call("send_group_notice", group_id=args.group_id, content=args.content)
+    elif sub == "list":
+        result = api.call("get_group_list")
+    elif sub == "essence":
+        result = api.call("get_essence_list", group_id=args.group_id)
+    elif sub == "poke":
+        result = api.call("send_poke", group_id=args.group_id, user_id=args.user_id)
+    else:
+        print(f"Unknown group command: {sub}", file=sys.stderr)
+        return 1
+
+    print(json.dumps(result, indent=2, ensure_ascii=False))
+    return 0 if result.get("retcode") == 0 else 1
+
+
+def cmd_friend(args: argparse.Namespace, api: NapCatAPI) -> int:
+    """napcat friend - Friend management."""
+    sub = args.subcommand
+
+    if sub == "list":
+        result = api.call("get_friend_list")
+    elif sub == "info":
+        result = api.call("get_stranger_info", user_id=args.user_id, no_cache=args.no_cache)
+    elif sub == "remark":
+        result = api.call("set_friend_remark", user_id=args.user_id, remark=args.remark)
+    elif sub == "add":
+        result = api.call("set_friend_add_request", user_id=args.user_id, remark=args.remark or "")
+    elif sub == "delete":
+        result = api.call("delete_friend", user_id=args.user_id)
+    else:
+        print(f"Unknown friend command: {sub}", file=sys.stderr)
+        return 1
+
+    print(json.dumps(result, indent=2, ensure_ascii=False))
+    return 0 if result.get("retcode") == 0 else 1
+
+
+def cmd_file(args: argparse.Namespace, api: NapCatAPI) -> int:
+    """napcat file - File operations."""
+    sub = args.subcommand
+
+    if sub == "upload-group":
+        kwargs: dict = {"group_id": args.group_id, "file": args.file, "name": args.name or Path(args.file).name}
+        if args.folder:
+            kwargs["folder"] = args.folder
+        result = api.call("upload_group_file", **kwargs)
+    elif sub == "upload-private":
+        result = api.call("upload_private_file", user_id=args.user_id, file=args.file, name=args.name or Path(args.file).name)
+    elif sub == "list-group":
+        result = api.call("get_group_root_files", group_id=args.group_id)
+    elif sub == "list-folder":
+        result = api.call("get_group_files_by_folder", group_id=args.group_id, folder_id=args.folder_id)
+    elif sub == "info":
+        result = api.call("get_file", file_id=args.file_id)
+    elif sub == "download":
+        result = api.call("get_file", file_id=args.file_id)
+        if result.get("retcode") == 0:
+            local_path = result["data"]["file"]
+            print(f"File available at: {local_path}", file=sys.stderr)
+            if args.output_dir:
+                import shutil
+                dst = Path(args.output_dir) / Path(local_path).name
+                shutil.copy2(local_path, dst)
+                print(f"Copied to: {dst}", file=sys.stderr)
+    else:
+        print(f"Unknown file command: {sub}", file=sys.stderr)
+        return 1
+
+    print(json.dumps(result, indent=2, ensure_ascii=False))
+    return 0 if result.get("retcode") == 0 else 1
+
+
+def cmd_daemon(args: argparse.Namespace, api: NapCatAPI) -> int:
+    """napcat daemon - Manage the watch daemon."""
+    import subprocess
+    daemon_py = ROOT / "daemon" / "watch.py"
+
+    if args.subcommand == "start":
+        # Write config for daemon
+        cfg = get_config()
+        cfg_path = DATA_DIR / "daemon.json"
+        cfg_dict = {
+            "api_url": cfg.api_url,
+            "token": cfg.token,
+            "webhook_port": cfg.webhook_port,
+            "data_dir": str(DATA_DIR),
+            "wake_on_event": cfg.wake_on_event,
+        }
+        cfg_path.write_text(json.dumps(cfg_dict, indent=2))
+
+        # Launch daemon as background process
+        cmd = [sys.executable, str(daemon_py), str(cfg_path)]
+        proc = subprocess.Popen(cmd, stdout=open(DATA_DIR / "daemon.log", "a"), stderr=subprocess.STDOUT)
+        print(f"Daemon started (PID: {proc.pid})", file=sys.stderr)
+        print(f"Log: {DATA_DIR / 'daemon.log'}")
+        return 0
+
+    elif args.subcommand == "stop":
+        pid_file = DATA_DIR / "daemon.pid"
+        if pid_file.exists():
+            pid = int(pid_file.read_text().strip())
+            try:
+                os.kill(pid, 15)
+                pid_file.unlink()
+                print(f"Daemon (PID {pid}) stopped", file=sys.stderr)
+            except ProcessLookupError:
+                print("Daemon not running", file=sys.stderr)
+                pid_file.unlink()
+                return 0
+            return 0
+        else:
+            print("No daemon PID found", file=sys.stderr)
+            return 1
+
+    elif args.subcommand == "status":
+        pid_file = DATA_DIR / "daemon.pid"
+        if pid_file.exists():
+            pid = int(pid_file.read_text().strip())
+            try:
+                os.kill(pid, 0)
+                print(f"Daemon running (PID: {pid})", file=sys.stderr)
+                log = DATA_DIR / "daemon.log"
+                if log.exists():
+                    lines = log.read_text().splitlines()[-10:]
+                    print("Recent log:", file=sys.stderr)
+                    for line in lines:
+                        print(f"  {line}", file=sys.stderr)
+                return 0
+            except ProcessLookupError:
+                print("Daemon not running (stale PID file)", file=sys.stderr)
+                return 1
+        else:
+            print("Daemon not running", file=sys.stderr)
+            return 1
+
+    else:
+        print(f"Unknown daemon command: {args.subcommand}", file=sys.stderr)
+        return 1
+
+
+def cmd_events(args: argparse.Namespace, api: NapCatAPI) -> int:
+    """napcat events - Read events from the filesystem bridge."""
+    reader = EventsReader(DATA_DIR)
+    events = reader.read(limit=args.limit, event_type=args.type, since=args.since)
+
+    if args.output == "json":
+        print(json.dumps(events, indent=2, ensure_ascii=False))
+    else:
+        for ev in events:
+            ts = ev.get("time", 0)
+            ptype = ev.get("post_type", "?")
+            ntype = ev.get("notice_type", ev.get("request_type", "?"))
+            msg = ev.get("message", ev.get("raw_message", ""))
+            sender = ev.get("sender", {})
+            nickname = sender.get("nickname", "?") if isinstance(sender, dict) else "?"
+            print(f"[{ts}] {ptype}/{ntype} from {nickname}: {msg[:100]}")
+
+    return 0
+
+
+def cmd_alerts(args: argparse.Namespace, api: NapCatAPI) -> int:
+    """napcat alerts - Check or clear alert files."""
+    alerts_dir = DATA_DIR / "alerts"
+    alerts_dir.mkdir(exist_ok=True)
+
+    if args.clear:
+        import shutil
+        for f in alerts_dir.glob("*"):
+            if f.is_file():
+                f.unlink()
+        print("All alerts cleared", file=sys.stderr)
+        return 0
+
+    # List pending alerts
+    pending = list(alerts_dir.glob("*.alert"))
+    if not pending:
+        print("No pending alerts", file=sys.stderr)
+        return 0
+
+    print(f"Pending alerts ({len(pending)}):", file=sys.stderr)
+    for af in sorted(pending, key=lambda p: p.stat().st_mtime):
+        name = af.stem
+        try:
+            data = json.loads(af.read_text())
+            summary = data.get("summary", data.get("text", "?"))
+            print(f"  [{name}] {summary[:80]}", file=sys.stderr)
+        except Exception:
+            print(f"  [{name}] (parse error)", file=sys.stderr)
+
+    return 0 if pending else 1
+
+
+def cmd_config(args: argparse.Namespace, api: NapCatAPI) -> int:
+    """napcat config - Manage configuration."""
+    cfg = get_config()
+
+    if args.subcommand == "get":
+        key = args.key
+        val = getattr(cfg, key, None)
+        if val is not None:
+            print(val)
+        else:
+            print(f"Unknown key: {key}", file=sys.stderr)
+            return 1
+        return 0
+
+    elif args.subcommand == "set":
+        cfg.set(args.key, args.value)
+        cfg.save()
+        print(f"Set {args.key} = {args.value}", file=sys.stderr)
+        return 0
+
+    elif args.subcommand == "show":
+        print(json.dumps({
+            "api_url": cfg.api_url,
+            "token": cfg.token,
+            "self_id": cfg.self_id,
+            "data_dir": str(DATA_DIR),
+            "webhook_port": cfg.webhook_port,
+            "wake_on_event": cfg.wake_on_event,
+        }, indent=2))
+        return 0
+
+    else:
+        print(f"Unknown config command: {args.subcommand}", file=sys.stderr)
+        return 1
+
+
+def cmd_status(args: argparse.Namespace, api: NapCatAPI) -> int:
+    """napcat status - Check bot status."""
+    result = api.call("get_login_info")
+    if result.get("retcode") == 0:
+        data = result["data"]
+        print(f"Logged in as: {data.get('nickname')} ({data.get('user_id')})", file=sys.stderr)
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        # Update config with self_id
+        cfg = get_config()
+        if cfg.self_id is None:
+            cfg.self_id = str(data.get("user_id", ""))
+            cfg.save()
+        return 0
+    else:
+        print("Not logged in", file=sys.stderr)
+        return 1
+
+
+def cmd_ocr(args: argparse.Namespace, api: NapCatAPI) -> int:
+    """napcat ocr - OCR an image."""
+    result = api.call("ocr_image", image=args.image)
+    print(json.dumps(result, indent=2, ensure_ascii=False))
+    return 0 if result.get("retcode") == 0 else 1
+
+
+def cmd_translate(args: argparse.Namespace, api: NapCatAPI) -> int:
+    """napcat translate - QQ translation (may not be available in all NapCat versions)."""
+    result = api.call("qq_translate", text=args.text, from_lang=args.from_lang, to_lang=args.to_lang)
+    if result.get("message") and "不支持" in result.get("message", ""):
+        print("Translation API not available in this NapCat version.", file=sys.stderr)
+        return 1
+    print(json.dumps(result, indent=2, ensure_ascii=False))
+    return 0 if result.get("retcode") == 0 else 1
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        prog="napcat",
+        description="NapCat QQ CLI - Standalone CLI and daemon for QQ bot management",
+    )
+    parser.add_argument("--api-url", default=None, help="Override NAPCAT_API_URL")
+    parser.add_argument("--token", default=None, help="Override NAPCAT_TOKEN")
+    parser.add_argument("--data-dir", default=None, help="Override NAPCAT_DATA_DIR")
+    parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
+    parser.add_argument("--version", action="version", version="napcat-cli 1.0.0")
+
+    subparsers = parser.add_subparsers(dest="command", help="Available commands")
+
+    # --- api ---
+    api_p = subparsers.add_parser("api", help="Raw API access (like gh api)")
+    api_p.add_argument("endpoint", help="API endpoint (e.g., get_login_info)")
+    api_p.add_argument("--method", choices=["GET", "POST", "PUT", "DELETE"], default=None)
+    api_p.add_argument("--data", "-d", help="JSON data for POST/PUT requests")
+    api_p.add_argument("--output", "-o", choices=["json", "value", "raw"], default="json")
+
+    # --- send ---
+    send_p = subparsers.add_parser("send", help="Send a message")
+    send_p.add_argument("target_type", choices=["group", "private"])
+    send_p.add_argument("target_id", help="Group ID or user ID")
+    send_p.add_argument("message", help="Message text")
+    send_p.add_argument("--at", nargs="+", help="QQ numbers to @")
+    send_p.add_argument("--file", help="File to send")
+    send_p.add_argument("--image", help="Image to send")
+
+    # --- recall ---
+    recall_p = subparsers.add_parser("recall", help="Recall a message")
+    recall_p.add_argument("message_id", help="Message ID to recall")
+    recall_p.add_argument("--group", help="Group ID (for group messages)")
+
+    # --- group ---
+    group_p = subparsers.add_parser("group", help="Group management")
+    group_sub = group_p.add_subparsers(dest="subcommand")
+
+    gi = group_sub.add_parser("info", help="Get group info")
+    gi.add_argument("group_id")
+    gi.add_argument("--no-cache", action="store_true")
+
+    gm = group_sub.add_parser("members", help="List group members")
+    gm.add_argument("group_id")
+    gm.add_argument("--no-cache", action="store_true")
+
+    gmi = group_sub.add_parser("member", help="Get member info")
+    gmi.add_argument("group_id")
+    gmi.add_argument("user_id")
+    gmi.add_argument("--no-cache", action="store_true")
+
+    gmute = group_sub.add_parser("mute", help="Mute a member")
+    gmute.add_argument("group_id")
+    gmute.add_argument("user_id")
+    gmute.add_argument("--duration", "-d", type=int, default=None)
+
+    gu = group_sub.add_parser("unmute", help="Unmute a member")
+    gu.add_argument("group_id")
+    gu.add_argument("user_id")
+
+    gk = group_sub.add_parser("kick", help="Kick a member")
+    gk.add_argument("group_id")
+    gk.add_argument("user_id")
+    gk.add_argument("--reject", action="store_true", help="Prevent rejoin")
+
+    ga = group_sub.add_parser("admin", help="Set/remove admin")
+    ga.add_argument("group_id")
+    ga.add_argument("user_id")
+    ga.add_argument("--enable", action="store_true", default=True)
+    ga.add_argument("--disable", action="store_true", default=False)
+
+    gr = group_sub.add_parser("rename", help="Set group card name")
+    gr.add_argument("group_id")
+    gr.add_argument("user_id")
+    gr.add_argument("card", help="Card name")
+
+    gre = group_sub.add_parser("remark", help="Set group remark")
+    gre.add_argument("group_id")
+    gre.add_argument("remark")
+
+    gan = group_sub.add_parser("announce", help="Send group announcement")
+    gan.add_argument("group_id")
+    gan.add_argument("content")
+
+    gl = group_sub.add_parser("list", help="List groups")
+
+    ge = group_sub.add_parser("essence", help="List essence messages")
+    ge.add_argument("group_id")
+
+    gp = group_sub.add_parser("poke", help="Poke a member")
+    gp.add_argument("group_id")
+    gp.add_argument("user_id")
+
+    # --- friend ---
+    friend_p = subparsers.add_parser("friend", help="Friend management")
+    friend_sub = friend_p.add_subparsers(dest="subcommand")
+
+    fl = friend_sub.add_parser("list", help="List friends")
+    fi = friend_sub.add_parser("info", help="Get user info")
+    fi.add_argument("user_id")
+    fi.add_argument("--no-cache", action="store_true")
+    fr = friend_sub.add_parser("remark", help="Set friend remark")
+    fr.add_argument("user_id")
+    fr.add_argument("remark")
+    fa = friend_sub.add_parser("add", help="Send friend request")
+    fa.add_argument("user_id")
+    fa.add_argument("--remark", default=None)
+    fd = friend_sub.add_parser("delete", help="Delete friend")
+    fd.add_argument("user_id")
+
+    # --- file ---
+    file_p = subparsers.add_parser("file", help="File operations")
+    file_sub = file_p.add_subparsers(dest="subcommand")
+
+    fg = file_sub.add_parser("upload-group", help="Upload file to group")
+    fg.add_argument("group_id")
+    fg.add_argument("file")
+    fg.add_argument("--name", default=None)
+    fg.add_argument("--folder", default=None)
+
+    fp = file_sub.add_parser("upload-private", help="Upload file privately")
+    fp.add_argument("user_id")
+    fp.add_argument("file")
+    fp.add_argument("--name", default=None)
+
+    flg = file_sub.add_parser("list-group", help="List group files")
+    flg.add_argument("group_id")
+
+    flf = file_sub.add_parser("list-folder", help="List folder contents")
+    flf.add_argument("group_id")
+    flf.add_argument("folder_id")
+
+    finfo = file_sub.add_parser("info", help="Get file info")
+    finfo.add_argument("file_id")
+
+    fd = file_sub.add_parser("download", help="Download a file")
+    fd.add_argument("file_id")
+    fd.add_argument("--output-dir", "-o", default=None)
+
+    # --- daemon ---
+    daemon_p = subparsers.add_parser("daemon", help="Manage watch daemon")
+    daemon_p.add_argument("subcommand", choices=["start", "stop", "status"])
+
+    # --- events ---
+    events_p = subparsers.add_parser("events", help="Read events from filesystem")
+    events_p.add_argument("--type", default=None, help="Filter by event type")
+    events_p.add_argument("--since", type=int, default=None, help="Events after timestamp")
+    events_p.add_argument("--limit", "-n", type=int, default=50, help="Max events to read")
+    events_p.add_argument("--output", "-o", choices=["json", "text"], default="json")
+
+    # --- alerts ---
+    alerts_p = subparsers.add_parser("alerts", help="Check alert files")
+    alerts_p.add_argument("--clear", action="store_true", help="Clear all alerts")
+
+    # --- config ---
+    config_p = subparsers.add_parser("config", help="Manage configuration")
+    config_sub = config_p.add_subparsers(dest="subcommand")
+    cget = config_sub.add_parser("get", help="Get a config value")
+    cget.add_argument("key")
+    cset = config_sub.add_parser("set", help="Set a config value")
+    cset.add_argument("key")
+    cset.add_argument("value")
+    config_sub.add_parser("show", help="Show all config")
+
+    # --- status ---
+    subparsers.add_parser("status", help="Check bot login status")
+
+    # --- ocr ---
+    ocr_p = subparsers.add_parser("ocr", help="OCR an image")
+    ocr_p.add_argument("image", help="Image file path or URL")
+
+    # --- translate ---
+    trans_p = subparsers.add_parser("translate", help="QQ translation")
+    trans_p.add_argument("text", help="Text to translate")
+    trans_p.add_argument("--from", dest="from_lang", default="auto")
+    trans_p.add_argument("--to", dest="to_lang", default="zh")
+
+    args = parser.parse_args()
+
+    if not args.command:
+        parser.print_help()
+        return 1
+
+    # Apply overrides
+    if args.api_url:
+        os.environ["NAPCAT_API_URL"] = args.api_url
+    if args.token:
+        os.environ["NAPCAT_TOKEN"] = args.token
+    if args.data_dir:
+        os.environ["NAPCAT_DATA_DIR"] = args.data_dir
+
+    # Init API client
+    api = NapCatAPI()
+
+    # Dispatch
+    commands = {
+        "api": cmd_api,
+        "send": cmd_send,
+        "recall": cmd_recall,
+        "group": cmd_group,
+        "friend": cmd_friend,
+        "file": cmd_file,
+        "daemon": cmd_daemon,
+        "events": cmd_events,
+        "alerts": cmd_alerts,
+        "config": cmd_config,
+        "status": cmd_status,
+        "ocr": cmd_ocr,
+        "translate": cmd_translate,
+    }
+
+    handler = commands.get(args.command)
+    if handler:
+        return handler(args, api)
+    else:
+        parser.print_help()
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
