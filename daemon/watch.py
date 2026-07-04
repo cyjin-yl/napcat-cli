@@ -601,7 +601,8 @@ class NapCatHandler(BaseHTTPRequestHandler):
             return {"cleared": self.processor.writer.clear_all_alerts()}
 
         # Group / message browsing: events stored by the WebSocket listener are
-        # exposed as a navigable filesystem under napcat/groups/{group_id}/...
+        # exposed as a navigable filesystem under napcat/groups/{group_id}/... and
+        # napcat/friends/{user_id}/....
         if action == "list_groups":
             groups = set()
             for e in self.events_reader.read(limit=10000):
@@ -610,12 +611,22 @@ class NapCatHandler(BaseHTTPRequestHandler):
                     groups.add(str(gid))
             return {"entries": [{"name": g, "kind": "dynamic_dir"} for g in sorted(groups)]}
 
+        if action == "list_friends":
+            users = set()
+            for e in self.events_reader.read(limit=10000):
+                uid = e.get("user_id")
+                # Only include private messages as "friend" conversations.
+                if uid and not e.get("group_id"):
+                    users.add(str(uid))
+            return {"entries": [{"name": u, "kind": "dynamic_dir"} for u in sorted(users)]}
+
         if action == "list_time_ranges":
             ranges = ["recent", "1days", "7days", "30days", "90days"]
             return {"entries": [{"name": r, "kind": "dynamic_dir"} for r in ranges]}
 
         if action == "list_messages":
             group_id = str(params.get("group_id", ""))
+            user_id = str(params.get("user_id", ""))
             time_range = params.get("time_range", "recent")
             now = time.time()
             cutoff = now
@@ -631,7 +642,11 @@ class NapCatHandler(BaseHTTPRequestHandler):
                 cutoff = now - 90 * 86400
             messages = []
             for e in self.events_reader.read(limit=10000):
-                if str(e.get("group_id", "")) != group_id:
+                if group_id and str(e.get("group_id", "")) != group_id:
+                    continue
+                if user_id and str(e.get("user_id", "")) != user_id:
+                    continue
+                if not group_id and not user_id:
                     continue
                 if e.get("time", 0) < cutoff:
                     continue
@@ -642,13 +657,44 @@ class NapCatHandler(BaseHTTPRequestHandler):
 
         if action == "get_message":
             group_id = str(params.get("group_id", ""))
+            user_id = str(params.get("user_id", ""))
             message_id = str(params.get("message_id", ""))
             for e in self.events_reader.read(limit=10000):
-                if str(e.get("group_id", "")) != group_id:
+                if group_id and str(e.get("group_id", "")) != group_id:
+                    continue
+                if user_id and str(e.get("user_id", "")) != user_id:
+                    continue
+                if not group_id and not user_id:
                     continue
                 if str(e.get("message_id", e.get("id", ""))) == message_id:
                     return e
-            return {"error": f"Message {message_id} not found in group {group_id}"}
+            scope = f"group {group_id}" if group_id else f"friend {user_id}"
+            return {"error": f"Message {message_id} not found in {scope}"}
+
+        if action == "send_group_message":
+            group_id = str(params.get("group_id", ""))
+            message = params.get("message", "")
+            if not group_id or not message:
+                return {"error": "group_id and message are required"}
+            from lib.api import NapCatAPI
+            api = NapCatAPI()
+            return api.request("send_group_msg", method="POST", json_body={
+                "group_id": int(group_id) if group_id.isdigit() else group_id,
+                "message": message,
+            })
+
+        if action == "send_private_message":
+            user_id = str(params.get("user_id", ""))
+            message = params.get("message", "")
+            if not user_id or not message:
+                return {"error": "user_id and message are required"}
+            from lib.api import NapCatAPI
+            api = NapCatAPI()
+            return api.request("send_private_msg", method="POST", json_body={
+                "user_id": int(user_id) if user_id.isdigit() else user_id,
+                "message": message,
+            })
+
         # Proxy NapCat API calls through napcat_ prefix
         if action.startswith("napcat_"):
             from lib.api import NapCatAPI

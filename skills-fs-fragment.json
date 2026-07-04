@@ -362,13 +362,13 @@
       "path": "/napcat/AGENTS.md",
       "kind": "blob",
       "mode": "0444",
-      "data": "# NapCat Directory\n\nThis directory exposes NapCat QQ bot capabilities as files.\nSubdirectories and files represent API endpoints, events, alerts, and group messages.\n"
+      "data": "# NapCat Directory\n\nThis directory exposes NapCat QQ bot capabilities as files.\nSubdirectories and files represent API endpoints, events, alerts, and conversations.\n\n- `/napcat/groups/{group_id}/...` — group conversations and messages\n- `/napcat/friends/{user_id}/...` — private conversations and messages\n- `/napcat/send_group`, `/napcat/send_private` — legacy send endpoints (prefer group/friend `send` files)\n- `/napcat/events/`, `/napcat/alerts/` — real-time events and notifications\n"
     },
     {
       "path": "/napcat/groups/AGENTS.md",
       "kind": "blob",
       "mode": "0444",
-      "data": "# Groups Directory\n\nLists group IDs that the bot has seen messages from.\nEach group ID is a dynamic directory containing time-range subdirectories.\n"
+      "data": "# Groups Directory\n\nLists group IDs that the bot has seen messages from.\nEach group ID is a dynamic directory containing time-range subdirectories and a `send` file.\nWrite to `/napcat/groups/{group_id}/send` to send a group message.\n"
     },
     {
       "path": "/napcat/groups/:group_id/AGENTS.md",
@@ -381,6 +381,66 @@
       "kind": "blob",
       "mode": "0444",
       "data": "# Time Range Directory\n\nParameters:\n- group_id: QQ group ID\n- time_range: recent | 1days | 7days | 30days | 90days\n\nLists message IDs in the selected time range.\n"
+    },
+    {
+      "path": "/napcat/groups/:group_id/send",
+      "kind": "api",
+      "provider": "napcat",
+      "read": "send_group_message",
+      "write": "send_group_message",
+      "mode": "0644",
+      "writeParams": "json"
+    },
+    {
+      "path": "/napcat/friends",
+      "kind": "dynamic_dir",
+      "provider": "napcat",
+      "read": "list_friends"
+    },
+    {
+      "path": "/napcat/friends/:user_id",
+      "kind": "dynamic_dir",
+      "provider": "napcat",
+      "read": "list_time_ranges"
+    },
+    {
+      "path": "/napcat/friends/:user_id/:time_range",
+      "kind": "dynamic_dir",
+      "provider": "napcat",
+      "read": "list_messages"
+    },
+    {
+      "path": "/napcat/friends/:user_id/:time_range/:message_id",
+      "kind": "api",
+      "provider": "napcat",
+      "read": "get_message"
+    },
+    {
+      "path": "/napcat/friends/:user_id/send",
+      "kind": "api",
+      "provider": "napcat",
+      "read": "send_private_message",
+      "write": "send_private_message",
+      "mode": "0644",
+      "writeParams": "json"
+    },
+    {
+      "path": "/napcat/friends/AGENTS.md",
+      "kind": "blob",
+      "mode": "0444",
+      "data": "# Friends Directory\n\nLists user IDs that the bot has had private-message conversations with.\nEach user ID is a dynamic directory containing time-range subdirectories and a `send` file.\n"
+    },
+    {
+      "path": "/napcat/friends/:user_id/AGENTS.md",
+      "kind": "blob",
+      "mode": "0444",
+      "data": "# Friend Directory\n\nParameters:\n- user_id: QQ user ID\n\nSubdirectories are time ranges: recent, 1days, 7days, 30days, 90days.\nWrite to the `send` file to send a private message to this user.\n"
+    },
+    {
+      "path": "/napcat/friends/:user_id/:time_range/AGENTS.md",
+      "kind": "blob",
+      "mode": "0444",
+      "data": "# Time Range Directory\n\nParameters:\n- user_id: QQ user ID\n- time_range: recent | 1days | 7days | 30days | 90days\n\nLists message IDs in the selected time range.\n"
     }
   ]
 }

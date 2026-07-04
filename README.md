@@ -53,16 +53,25 @@ The skills-fs integration exposes QQ bot capabilities as an intuitive virtual fi
 ```
 ~/.hermes/skills/napcat-cli/          # FUSE mountpoint
 ├── SKILL.md                          # Auto-generated skill documentation
+├── AGENTS.md                         # Agent guide: daemon setup and navigation
 ├── persona.md                        # Bot persona / system prompt artifact
 ├── napcat/                           # API endpoints as files
 │   ├── events/                       # Real-time event stream
 │   ├── alerts/                       # Pending notifications
 │   ├── groups/                       # Dynamic directory: group IDs
-│   │   └── {group_id}/               # Dynamic directory: time ranges
-│   │       └── {recent,1days,...}/   # Dynamic directory: message IDs
+│   │   └── {group_id}/             # Dynamic directory: time ranges + send file
+│   │       ├── AGENTS.md
+│   │       ├── send                # Write message JSON to send to this group
+│   │       └── {recent,1days,...}/ # Dynamic directory: message IDs
 │   │           └── {message_id}    # API file: read message metadata
-│   ├── send_group                    # Send group messages
-│   ├── send_private                  # Send private messages
+│   ├── friends/                      # Dynamic directory: user IDs
+│   │   └── {user_id}/              # Dynamic directory: time ranges + send file
+│   │       ├── AGENTS.md
+│   │       ├── send                # Write message JSON to send to this friend
+│   │       └── {recent,1days,...}/ # Dynamic directory: message IDs
+│   │           └── {message_id}    # API file: read message metadata
+│   ├── send_group                    # Legacy group send endpoint
+│   ├── send_private                  # Legacy private send endpoint
 │   └── ...                           # Other API endpoints
 ```
 
@@ -71,10 +80,10 @@ The skills-fs integration exposes QQ bot capabilities as an intuitive virtual fi
 1. **Browse Intuitively** — Navigate `napcat/` to explore endpoints.
 2. **Read Operations** — Files contain data (JSON, text, etc.).
 3. **Write Operations** — Writing JSON to a write-enabled file triggers the corresponding NapCat API call. The JSON payload is forwarded as provider parameters (requires `writeParams: "json"`).
-4. **Dynamic Directories** — `napcat/groups/{group_id}/...` are provider-backed directories that render group IDs, time ranges, and message IDs on demand.
+4. **Dynamic Directories** — `napcat/groups/{group_id}/...` and `napcat/friends/{user_id}/...` are provider-backed directories that render IDs, time ranges, and message IDs on demand. Each directory also exposes a `send` file scoped to that group or friend.
 5. **Auto-Generated Docs** — `SKILL.md` is generated from the skill definition and exposed at the FUSE root via `exposeAtRoot: true`.
 6. **Persona Artifact** — `persona.md` is mounted as a blob at the FUSE root for agents to read the bot persona.
-7. **Agent Guidance (AGENTS.md)** — Planned per-directory `AGENTS.md` files that describe what each directory contains and what parameters are available, so agents can navigate without guessing.
+7. **Agent Guidance (AGENTS.md)** — Per-directory `AGENTS.md` files describe what each directory contains and what parameters are available, so agents can navigate without guessing.
 
 ### Example: Agent Workflow
 
@@ -88,11 +97,20 @@ cat ~/.hermes/skills/napcat-cli/napcat/events
 # Browse group messages dynamically
 ls ~/.hermes/skills/napcat-cli/napcat/groups
 ls ~/.hermes/skills/napcat-cli/napcat/groups/123456
+cat ~/.hermes/skills/napcat-cli/napcat/groups/123456/AGENTS.md
 ls ~/.hermes/skills/napcat-cli/napcat/groups/123456/recent
 cat ~/.hermes/skills/napcat-cli/napcat/groups/123456/recent/1001
 
-# Send a group message (payload forwarded as params)
-echo '{"group_id": 123456, "message": "Hello group!"}' > ~/.hermes/skills/napcat-cli/napcat/send_group
+# Send to a specific group by writing to its send file
+echo '{"message": "Hello group!"}' > ~/.hermes/skills/napcat-cli/napcat/groups/123456/send
+
+# Browse private friend messages
+ls ~/.hermes/skills/napcat-cli/napcat/friends
+ls ~/.hermes/skills/napcat-cli/napcat/friends/987654
+cat ~/.hermes/skills/napcat-cli/napcat/friends/987654/recent/2001
+
+# Send to a specific friend
+echo '{"message": "Hi!"}' > ~/.hermes/skills/napcat-cli/napcat/friends/987654/send
 
 # Clear a specific alert
 echo '{"name": "NEW_MESSAGE"}' > ~/.hermes/skills/napcat-cli/napcat/clear_alert
@@ -301,7 +319,7 @@ The daemon generates alert files for important events:
 Daemon runs HTTP server implementing skills-fs provider contract:
 
 - **Endpoint**: `http://127.0.0.1:18821`
-- **Actions**: `get_events`, `get_alerts`, `clear_alert`, `list_groups`, `list_time_ranges`, `list_messages`, `get_message`, `napcat_*` (API proxy)
+- **Actions**: `get_events`, `get_alerts`, `clear_alert`, `list_groups`, `list_friends`, `list_time_ranges`, `list_messages`, `get_message`, `send_group_message`, `send_private_message`, `napcat_*` (API proxy)
 - **Format**: JSON request/response
 
 Dynamic directory actions return entries in the format `{"entries": [{"name": "...", "kind": "..."}]}` so skills-fs can render them as directories.
