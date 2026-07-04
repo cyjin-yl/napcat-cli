@@ -206,9 +206,22 @@ cp skills-fs-config.json ~/.hermes/skills-fs.json
 
 Key configuration points:
 
-- **FUSE mountpoint** — Start `skills-fs` with `--mountpoint ~/.hermes/skills/napcat-cli` (no `-fs` suffix). The mountpoint doubles as the skill directory, so `SKILL.md` is exposed at the FUSE root via `exposeAtRoot: true`.
+- **FUSE mountpoint** — Start `skills-fs` with `--mountpoint ~/.hermes/skills/napcat-cli` (no `-fs` suffix). The generated `SKILL.md` is exposed at the FUSE root via `exposeAtRoot: true`.
 - **Payload forwarding** — Every write-enabled API mount uses `"writeParams": "json"` so that the JSON written to the file is forwarded as provider parameters.
 - **Persona artifact** — `persona.md` is mounted as a blob at `/persona.md`.
+
+Note: because `skillsRoot` is `~/.hermes/skills`, the skill generator writes `SKILL.md` to `~/.hermes/skills/napcat-cli/SKILL.md` before the FUSE daemon mounts. After FUSE mounts, that on-disk file is hidden and replaced by the virtual `/SKILL.md` exposed by `exposeAtRoot: true`. This is expected.
+
+### Running skills-fs
+
+```bash
+skills-fs fuse --config ~/.hermes/skills-fs.json \
+  --mountpoint ~/.hermes/skills/napcat-cli \
+  --allow-other \
+  --log-file ~/.hermes/skills-fuse.log
+```
+
+If you need to validate or regenerate the config while FUSE is already mounted, unmount it first (e.g. `fusermount3 -u ~/.hermes/skills/napcat-cli`), then validate and remount.
 
 Example minimal config snippet:
 
