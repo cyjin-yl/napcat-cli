@@ -57,6 +57,10 @@ The skills-fs integration exposes QQ bot capabilities as an intuitive virtual fi
 ├── napcat/                           # API endpoints as files
 │   ├── events/                       # Real-time event stream
 │   ├── alerts/                       # Pending notifications
+│   ├── groups/                       # Dynamic directory: group IDs
+│   │   └── {group_id}/               # Dynamic directory: time ranges
+│   │       └── {recent,1days,...}/   # Dynamic directory: message IDs
+│   │           └── {message_id}    # API file: read message metadata
 │   ├── send_group                    # Send group messages
 │   ├── send_private                  # Send private messages
 │   └── ...                           # Other API endpoints
@@ -67,8 +71,10 @@ The skills-fs integration exposes QQ bot capabilities as an intuitive virtual fi
 1. **Browse Intuitively** — Navigate `napcat/` to explore endpoints.
 2. **Read Operations** — Files contain data (JSON, text, etc.).
 3. **Write Operations** — Writing JSON to a write-enabled file triggers the corresponding NapCat API call. The JSON payload is forwarded as provider parameters (requires `writeParams: "json"`).
-4. **Auto-Generated Docs** — `SKILL.md` is generated from the skill definition and exposed at the FUSE root via `exposeAtRoot: true`.
-5. **Persona Artifact** — `persona.md` is mounted as a blob at the FUSE root for agents to read the bot persona.
+4. **Dynamic Directories** — `napcat/groups/{group_id}/...` are provider-backed directories that render group IDs, time ranges, and message IDs on demand.
+5. **Auto-Generated Docs** — `SKILL.md` is generated from the skill definition and exposed at the FUSE root via `exposeAtRoot: true`.
+6. **Persona Artifact** — `persona.md` is mounted as a blob at the FUSE root for agents to read the bot persona.
+7. **Agent Guidance (AGENTS.md)** — Planned per-directory `AGENTS.md` files that describe what each directory contains and what parameters are available, so agents can navigate without guessing.
 
 ### Example: Agent Workflow
 
@@ -79,11 +85,17 @@ cat ~/.hermes/skills/napcat-cli/napcat/status
 # Read recent events
 cat ~/.hermes/skills/napcat-cli/napcat/events
 
+# Browse group messages dynamically
+ls ~/.hermes/skills/napcat-cli/napcat/groups
+ls ~/.hermes/skills/napcat-cli/napcat/groups/123456
+ls ~/.hermes/skills/napcat-cli/napcat/groups/123456/recent
+cat ~/.hermes/skills/napcat-cli/napcat/groups/123456/recent/1001
+
 # Send a group message (payload forwarded as params)
 echo '{"group_id": 123456, "message": "Hello group!"}' > ~/.hermes/skills/napcat-cli/napcat/send_group
 
 # Clear a specific alert
-echo '{"alert_name": "NEW_MESSAGE"}' > ~/.hermes/skills/napcat-cli/napcat/clear_alert
+echo '{"name": "NEW_MESSAGE"}' > ~/.hermes/skills/napcat-cli/napcat/clear_alert
 ```
 
 ## CLI Usage
@@ -289,8 +301,10 @@ The daemon generates alert files for important events:
 Daemon runs HTTP server implementing skills-fs provider contract:
 
 - **Endpoint**: `http://127.0.0.1:18821`
-- **Actions**: `get_events`, `get_alerts`, `clear_alert`, `napcat_*` (API proxy)
+- **Actions**: `get_events`, `get_alerts`, `clear_alert`, `list_groups`, `list_time_ranges`, `list_messages`, `get_message`, `napcat_*` (API proxy)
 - **Format**: JSON request/response
+
+Dynamic directory actions return entries in the format `{"entries": [{"name": "...", "kind": "..."}]}` so skills-fs can render them as directories.
 
 ## Development
 

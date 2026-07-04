@@ -594,12 +594,61 @@ class NapCatHandler(BaseHTTPRequestHandler):
             return {"alerts": alerts, "count": len(alerts)}
 
         if action == "clear_alert":
-            name = params.get("name", "")
+            name = params.get("name") or params.get("alert_name", "")
             return {"cleared": self.processor.writer.clear_alert(name)}
 
         if action == "clear_all_alerts":
             return {"cleared": self.processor.writer.clear_all_alerts()}
 
+        # Group / message browsing: events stored by the WebSocket listener are
+        # exposed as a navigable filesystem under napcat/groups/{group_id}/...
+        if action == "list_groups":
+            groups = set()
+            for e in self.events_reader.read(limit=10000):
+                gid = e.get("group_id")
+                if gid:
+                    groups.add(str(gid))
+            return {"entries": [{"name": g, "kind": "dynamic_dir"} for g in sorted(groups)]}
+
+        if action == "list_time_ranges":
+            ranges = ["recent", "1days", "7days", "30days", "90days"]
+            return {"entries": [{"name": r, "kind": "dynamic_dir"} for r in ranges]}
+
+        if action == "list_messages":
+            group_id = str(params.get("group_id", ""))
+            time_range = params.get("time_range", "recent")
+            now = time.time()
+            cutoff = now
+            if time_range == "recent":
+                cutoff = now - 3600  # 1 hour
+            elif time_range == "1days":
+                cutoff = now - 86400
+            elif time_range == "7days":
+                cutoff = now - 7 * 86400
+            elif time_range == "30days":
+                cutoff = now - 30 * 86400
+            elif time_range == "90days":
+                cutoff = now - 90 * 86400
+            messages = []
+            for e in self.events_reader.read(limit=10000):
+                if str(e.get("group_id", "")) != group_id:
+                    continue
+                if e.get("time", 0) < cutoff:
+                    continue
+                mid = str(e.get("message_id", e.get("id", "")))
+                if mid:
+                    messages.append({"name": mid, "kind": "api"})
+            return {"entries": messages}
+
+        if action == "get_message":
+            group_id = str(params.get("group_id", ""))
+            message_id = str(params.get("message_id", ""))
+            for e in self.events_reader.read(limit=10000):
+                if str(e.get("group_id", "")) != group_id:
+                    continue
+                if str(e.get("message_id", e.get("id", ""))) == message_id:
+                    return e
+            return {"error": f"Message {message_id} not found in group {group_id}"}
         # Proxy NapCat API calls through napcat_ prefix
         if action.startswith("napcat_"):
             from lib.api import NapCatAPI
