@@ -51,41 +51,39 @@ The skills-fs integration exposes QQ bot capabilities as an intuitive virtual fi
 ### Filesystem Structure
 
 ```
-~/.hermes/skills/napcat-cli/
-├── skills/              # Auto-generated skill documentation
-│   └── napcat-cli.md   # Complete API reference
-└── napcat/             # API endpoints as files
-    ├── groups/         # Browse groups by ID
-    │   ├── 123456/    # Group-specific data
-    │   │   ├── messages/   # Message history
-    │   │   ├── members/    # Member list
-    │   │   └── info        # Group information
-    │   └── 789012/
-    ├── events/        # Real-time event stream
-    ├── alerts/        # Pending notifications
-    ├── send_group     # Send group messages
-    ├── send_private   # Send private messages
-    └── ...            # Other API endpoints
+~/.hermes/skills/napcat-cli/          # FUSE mountpoint
+├── SKILL.md                          # Auto-generated skill documentation
+├── persona.md                        # Bot persona / system prompt artifact
+├── napcat/                           # API endpoints as files
+│   ├── events/                       # Real-time event stream
+│   ├── alerts/                       # Pending notifications
+│   ├── send_group                    # Send group messages
+│   ├── send_private                  # Send private messages
+│   └── ...                           # Other API endpoints
 ```
 
 ### How It Works
 
-1. **Browse Intuitively** — Navigate directories to explore groups and messages
-2. **Read Operations** — Files contain data (JSON, text, etc.)
-3. **Write Operations** — Writing to files triggers API calls
-4. **Auto-Generated Docs** — `skill.md` files generated from endpoint definitions
+1. **Browse Intuitively** — Navigate `napcat/` to explore endpoints.
+2. **Read Operations** — Files contain data (JSON, text, etc.).
+3. **Write Operations** — Writing JSON to a write-enabled file triggers the corresponding NapCat API call. The JSON payload is forwarded as provider parameters (requires `writeParams: "json"`).
+4. **Auto-Generated Docs** — `SKILL.md` is generated from the skill definition and exposed at the FUSE root via `exposeAtRoot: true`.
+5. **Persona Artifact** — `persona.md` is mounted as a blob at the FUSE root for agents to read the bot persona.
 
 ### Example: Agent Workflow
 
 ```bash
-# Check available groups
-ls ~/.hermes/skills/napcat-cli/napcat/groups/
+# Check bot status
+cat ~/.hermes/skills/napcat-cli/napcat/status
 
-# Read messages from specific group
-cat ~/.hermes/skills/napcat-cli/napcat/groups/1050866499/messages/
+# Read recent events
+cat ~/.hermes/skills/napcat-cli/napcat/events
 
-# Send a message
-echo "Hello group!" > ~/.hermes/skills/napcat-cli/napcat/send_group
+# Send a group message (payload forwarded as params)
+echo '{"group_id": 123456, "message": "Hello group!"}' > ~/.hermes/skills/napcat-cli/napcat/send_group
+
+# Clear a specific alert
+echo '{"alert_name": "NEW_MESSAGE"}' > ~/.hermes/skills/napcat-cli/napcat/clear_alert
 ```
 
 ## CLI Usage
@@ -200,32 +198,52 @@ napcat daemon stop
 
 ### skills-fs Configuration
 
-The daemon uses skills-fs config at `~/.hermes/skills-fs.json`:
+A sample `skills-fs-config.json` is shipped in the repository root. Copy it to the runtime location and adjust the home path if needed:
+
+```bash
+cp skills-fs-config.json ~/.hermes/skills-fs.json
+```
+
+Key configuration points:
+
+- **FUSE mountpoint** — Start `skills-fs` with `--mountpoint ~/.hermes/skills/napcat-cli` (no `-fs` suffix). The mountpoint doubles as the skill directory, so `SKILL.md` is exposed at the FUSE root via `exposeAtRoot: true`.
+- **Payload forwarding** — Every write-enabled API mount uses `"writeParams": "json"` so that the JSON written to the file is forwarded as provider parameters.
+- **Persona artifact** — `persona.md` is mounted as a blob at `/persona.md`.
+
+Example minimal config snippet:
 
 ```json
 {
   "providers": [
-    {
-      "id": "napcat",
-      "url": "http://127.0.0.1:18821"
-    }
+    { "id": "napcat", "url": "http://127.0.0.1:18821/invoke" }
   ],
   "skillsRoot": "/home/ezra/.hermes/skills",
   "skills": [
     {
       "name": "napcat-cli",
-      "description": "NapCat QQ bot messaging",
+      "description": "NapCat QQ bot messaging — send messages, read events, manage groups, handle friends",
       "enabled": true,
-      "bodyTemplate": "# NapCat CLI Skill\n..."
+      "version": "1.0.0",
+      "author": "Ezra",
+      "license": "MIT",
+      "platforms": ["linux"],
+      "metadata": { "source": "napcat-cli", "category": "messaging" },
+      "allowedTools": ["read_file", "write_file", "list_directory"],
+      "bodyTemplate": "# NapCat CLI Skill\n...",
+      "exposeAtRoot": true
     }
   ],
   "mounts": [
+    { "path": "/napcat", "kind": "dir", "mode": "0755" },
+    { "path": "/persona.md", "kind": "blob", "mode": "0444", "data": "..." },
     {
       "path": "/napcat/send_group",
       "kind": "api",
       "provider": "napcat",
       "read": "napcat_send_group_msg",
-      "write": "napcat_send_group_msg"
+      "write": "napcat_send_group_msg",
+      "mode": "0644",
+      "writeParams": "json"
     }
   ]
 }
@@ -269,6 +287,8 @@ Daemon runs HTTP server implementing skills-fs provider contract:
 napcat-cli/
 ├── napcat              # Main CLI script
 ├── config.py           # Configuration management
+├── skills-fs-config.json  # Sample skills-fs configuration (shipped with repo)
+├── persona.md         # Bot persona configuration (mounted as FUSE artifact)
 ├── lib/
 │   ├── api.py         # NapCat HTTP API client
 │   ├── events.py      # Event filesystem bridge
@@ -276,7 +296,7 @@ napcat-cli/
 ├── daemon/
 │   └── watch.py       # WebSocket daemon + HTTP provider
 ├── skills-fs/         # Virtual filesystem (submodule)
-└── persona.md         # Bot persona configuration
+└── README.md          # This file
 ```
 
 ### Running Tests
