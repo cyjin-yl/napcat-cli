@@ -451,6 +451,36 @@ def cmd_translate(args: argparse.Namespace, api: NapCatAPI) -> int:
     return 0 if result.get("retcode") == 0 else 1
 
 
+
+def cmd_phone(args: argparse.Namespace, api: NapCatAPI) -> int:
+    """napcat phone — Launch mobile-style TUI interface."""
+    import asyncio
+    import os as _os
+
+    if args.port:
+        _os.environ["NAPCAT_HTTP_PORT"] = str(args.port)
+
+    if args.non_interactive:
+        # Quick status check mode
+        from tui.api import get_client
+        client = get_client()
+        try:
+            events = asyncio.run(client.get_events(limit=5))
+            alerts = asyncio.run(client.get_alerts())
+            print(f"Events: {len(events)}, Alerts: {len(alerts)}")
+            for e in events[:3]:
+                print(f"  - {e.get('post_type', '?')}: {e.get('message_type', '')} {e.get('sender', {}).get('nickname', '')}")
+            return 0
+        except Exception as e:
+            print(f"Error connecting to daemon: {e}", file=sys.stderr)
+            return 1
+
+    # Full TUI mode
+    from tui.app import NapCatApp
+    app = NapCatApp()
+    app.run()
+    return 0
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         prog="napcat",
@@ -628,6 +658,11 @@ def main() -> int:
     trans_p.add_argument("--from", dest="from_lang", default="auto")
     trans_p.add_argument("--to", dest="to_lang", default="zh")
 
+
+    # --- phone ---
+    phone_p = subparsers.add_parser("phone", help="Launch mobile-style TUI interface")
+    phone_p.add_argument("--port", type=int, default=None, help="Daemon HTTP port (default: NAPCAT_HTTP_PORT or 18821)")
+    phone_p.add_argument("--non-interactive", action="store_true", help="Run once and exit (status check)")
     args = parser.parse_args()
 
     if not args.command:
@@ -660,6 +695,7 @@ def main() -> int:
         "status": cmd_status,
         "ocr": cmd_ocr,
         "translate": cmd_translate,
+        "phone": cmd_phone,
     }
 
     handler = commands.get(args.command)
