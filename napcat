@@ -250,6 +250,8 @@ def cmd_daemon(args: argparse.Namespace, api: NapCatAPI) -> int:
             "wake_on_event": cfg.wake_on_event,
             "ws_port": cfg.ws_port,
             "http_port": cfg.http_port,
+            "group_trigger_word": cfg.group_trigger_word,
+            "private_trigger": cfg.private_trigger,
         }
         cfg_path.write_text(json.dumps(cfg_dict, indent=2))
 
@@ -324,35 +326,29 @@ def cmd_events(args: argparse.Namespace, api: NapCatAPI) -> int:
 
 
 def cmd_alerts(args: argparse.Namespace, api: NapCatAPI) -> int:
-    """napcat alerts - Check or clear alert files."""
-    alerts_dir = DATA_DIR / "alerts"
-    alerts_dir.mkdir(exist_ok=True)
+    """napcat alerts - Check or clear alerts from SQLite database."""
+    from lib.events import EventsReader
+    reader = EventsReader(DATA_DIR)
 
     if args.clear:
-        import shutil
-        for f in alerts_dir.glob("*"):
-            if f.is_file():
-                f.unlink()
-        print("All alerts cleared", file=sys.stderr)
+        reader._get_conn()
+        from lib.events_sqlite import clear_alerts
+        count = clear_alerts(reader._conn)
+        print(f"All alerts cleared ({count} removed)", file=sys.stderr)
         return 0
 
-    # List pending alerts
-    pending = list(alerts_dir.glob("*.alert"))
-    if not pending:
+    alerts = reader.read_alerts()
+    if not alerts:
         print("No pending alerts", file=sys.stderr)
         return 0
 
-    print(f"Pending alerts ({len(pending)}):", file=sys.stderr)
-    for af in sorted(pending, key=lambda p: p.stat().st_mtime):
-        name = af.stem
-        try:
-            data = json.loads(af.read_text())
-            summary = data.get("summary", data.get("text", "?"))
-            print(f"  [{name}] {summary[:80]}", file=sys.stderr)
-        except Exception:
-            print(f"  [{name}] (parse error)", file=sys.stderr)
+    print(f"Pending alerts ({len(alerts)}):", file=sys.stderr)
+    for a in alerts:
+        name = a.get("name", "?")
+        summary = a.get("summary", a.get("text", "?"))
+        print(f"  [{name}] {summary[:80]}", file=sys.stderr)
 
-    return 0 if pending else 1
+    return 0 if alerts else 1
 
 
 def cmd_config(args: argparse.Namespace, api: NapCatAPI) -> int:

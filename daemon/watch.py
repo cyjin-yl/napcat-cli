@@ -45,11 +45,13 @@ from lib.events import EventsWriter, EventsReader
 class EventProcessor:
     """Process events and generate alerts."""
 
-    def __init__(self, data_dir: Path, self_id: str = "", wake_command: str = "", wake_on_event: bool = True):
+    def __init__(self, data_dir: Path, self_id: str = "", wake_command: str = "", wake_on_event: bool = True, *, group_trigger_word: str = "", private_trigger: str = ""):
         self.writer = EventsWriter(data_dir)
         self.self_id = self_id
         self.wake_command = wake_command
         self.wake_on_event = wake_on_event
+        self.group_trigger_word = group_trigger_word
+        self.private_trigger = private_trigger
         self.log_file = data_dir / "daemon.log"
 
     def log(self, msg: str) -> None:
@@ -61,8 +63,8 @@ class EventProcessor:
             pass
 
     def process(self, event: dict) -> None:
-        filename = self.writer.write_event(event)
-        self.log(f"Event: {filename}")
+        row_id = self.writer.write_event(event)
+        self.log(f"Event: row_id={row_id}")
         post_type = event.get("post_type", "")
         if post_type == "message":
             self._handle_message(event)
@@ -124,6 +126,19 @@ class EventProcessor:
                             })
                             self._wake("REPLY_TO_ME")
                             break
+
+        # --- Trigger word detection on plain text (no CQ codes) ---
+        segs = event.get("message", [])
+        plain_text = "".join(
+            (seg.get("data") or {}).get("text", "")
+            for seg in (segs if isinstance(segs, list) else [])
+            if isinstance(seg, dict) and seg.get("type") == "text"
+        )
+        if msg_type == "group" and self.group_trigger_word and self.group_trigger_word in plain_text:
+            self._wake("GROUP_TRIGGER")
+        elif msg_type == "private":
+            if self.private_trigger == "*" or (self.private_trigger and self.private_trigger in plain_text):
+                self._wake("PRIVATE_TRIGGER")
 
     def _handle_notice(self, event: dict) -> None:
         notice_type = event.get("notice_type", "")
@@ -569,59 +584,56 @@ class NapCatHandler(BaseHTTPRequestHandler):
 
     def _dispatch(self, action: str, params: dict) -> Any:
         """Dispatch action to handler. Returns data for skills-fs."""
+        from lib.events_sqlite import get_connection, read_events as db_read_events, read_alerts as db_read_alerts, get_event_count
+        db = get_connection(self.cache.data_dir)
 
         if action == "get_events":
-            events = self.cache.get(
+            events = db_read_events(
+                db,
                 limit=params.get("limit", 50),
-                since=params.get("since", 0.0),
+                since=params.get("since", None),
+                post_type=params.get("post_type", None),
+                event_type=params.get("event_type", None),
             )
             return {"events": events, "count": len(events)}
 
         if action == "get_event":
             event_id = params.get("id", "")
-            events = self.events_reader.read(limit=1000)
+            from lib.events_sqlite import read_events as db_read
+            events = db_read(db, limit=1000)
             for e in events:
-                if str(e.get("id", "")) == event_id or str(e.get("message_id", "")) == event_id:
+                if str(e.get("message_id", "")) == event_id:
                     return e
             return {"error": f"Event {event_id} not found"}
 
         if action == "get_alerts":
-            alerts_dir = self.cache.data_dir / "alerts"
-            alerts = []
-            if alerts_dir.exists():
-                for f in sorted(alerts_dir.iterdir()):
-                    if f.name.endswith(".alert"):
-                        try:
-                            alerts.append(json.loads(f.read_text()))
-                        except Exception:
-                            alerts.append({"file": f.name, "error": "unreadable"})
+            alerts = db_read_alerts(db, name=params.get("name"), limit=params.get("limit", 50))
             return {"alerts": alerts, "count": len(alerts)}
 
         if action == "clear_alert":
             name = params.get("name") or params.get("alert_name", "")
-            return {"cleared": self.processor.writer.clear_alert(name)}
+            from lib.events_sqlite import clear_alerts
+            count = clear_alerts(self.processor.writer.conn, name)
+            return {"cleared": count}
 
         if action == "clear_all_alerts":
-            return {"cleared": self.processor.writer.clear_all_alerts()}
+            from lib.events_sqlite import clear_alerts
+            count = clear_alerts(self.processor.writer.conn)
+            return {"cleared": count}
 
-        # Group / message browsing: events stored by the WebSocket listener are
-        # exposed as a navigable filesystem under napcat/groups/{group_id}/... and
-        # napcat/friends/{user_id}/....
+        # Group / message browsing via SQLite indexes
         if action == "list_groups":
             groups = set()
-            for e in self.events_reader.read(limit=10000):
-                gid = e.get("group_id")
-                if gid:
-                    groups.add(str(gid))
+            rows = db.execute("SELECT DISTINCT group_id FROM events WHERE group_id IS NOT NULL ORDER BY group_id").fetchall()
+            for r in rows:
+                groups.add(str(r["group_id"]))
             return {"entries": [{"name": g, "kind": "dynamic_dir"} for g in sorted(groups)]}
 
         if action == "list_friends":
-            users = set()
-            for e in self.events_reader.read(limit=10000):
-                uid = e.get("user_id")
-                # Only include private messages as "friend" conversations.
-                if uid and not e.get("group_id"):
-                    users.add(str(uid))
+            rows = db.execute(
+                "SELECT DISTINCT user_id FROM events WHERE post_type='message' AND message_type='private' AND user_id IS NOT NULL ORDER BY user_id"
+            ).fetchall()
+            users = [str(r["user_id"]) for r in rows if r["user_id"]]
             return {"entries": [{"name": u, "kind": "dynamic_dir"} for u in sorted(users)]}
 
         if action == "list_time_ranges":
@@ -635,7 +647,7 @@ class NapCatHandler(BaseHTTPRequestHandler):
             now = time.time()
             cutoff = now
             if time_range == "recent":
-                cutoff = now - 3600  # 1 hour
+                cutoff = now - 3600
             elif time_range == "1days":
                 cutoff = now - 86400
             elif time_range == "7days":
@@ -644,36 +656,48 @@ class NapCatHandler(BaseHTTPRequestHandler):
                 cutoff = now - 30 * 86400
             elif time_range == "90days":
                 cutoff = now - 90 * 86400
+
+            query = "SELECT message_id, timestamp, post_type, event_type, raw_json FROM events WHERE post_type='message' AND timestamp >= ?"
+            qparams = [cutoff]
+            if group_id:
+                query += " AND group_id = ?"
+                qparams.append(int(group_id))
+            if user_id:
+                query += " AND user_id = ?"
+                qparams.append(int(user_id))
+            query += " ORDER BY timestamp DESC LIMIT 500"
+            rows = db.execute(query, qparams).fetchall()
             messages = []
-            for e in self.events_reader.read(limit=10000):
-                if group_id and str(e.get("group_id", "")) != group_id:
-                    continue
-                if user_id and str(e.get("user_id", "")) != user_id:
-                    continue
-                if not group_id and not user_id:
-                    continue
-                if e.get("time", 0) < cutoff:
-                    continue
-                mid = str(e.get("message_id", e.get("id", "")))
+            for r in rows:
+                mid = str(r["message_id"]) if r["message_id"] else ""
                 if mid:
-                    messages.append({"name": mid, "kind": "api"})
+                    messages.append({"name": mid, "kind": "api", "time": r["timestamp"]})
             return {"entries": messages}
 
         if action == "get_message":
             group_id = str(params.get("group_id", ""))
             user_id = str(params.get("user_id", ""))
             message_id = str(params.get("message_id", ""))
-            for e in self.events_reader.read(limit=10000):
-                if group_id and str(e.get("group_id", "")) != group_id:
-                    continue
-                if user_id and str(e.get("user_id", "")) != user_id:
-                    continue
-                if not group_id and not user_id:
-                    continue
-                if str(e.get("message_id", e.get("id", ""))) == message_id:
-                    return e
+            query = "SELECT raw_json FROM events WHERE post_type='message' AND message_id = ?"
+            qparams = [message_id]
+            if group_id:
+                query += " AND group_id = ?"
+                qparams.append(int(group_id))
+            if user_id:
+                query += " AND user_id = ?"
+                qparams.append(int(user_id))
+            row = db.execute(query, qparams).fetchone()
+            if row:
+                import json as json_mod
+                return json_mod.loads(row["raw_json"])
             scope = f"group {group_id}" if group_id else f"friend {user_id}"
             return {"error": f"Message {message_id} not found in {scope}"}
+
+        if action == "get_stats":
+            event_count = get_event_count(db)
+            from lib.events_sqlite import get_alert_count
+            alert_count = get_alert_count(db)
+            return {"event_count": event_count, "alert_count": alert_count}
 
         if action == "send_group_message":
             group_id = str(params.get("group_id", ""))
@@ -739,9 +763,12 @@ def run_daemon(config_path: str) -> None:
     self_id = cfg_data.get("self_id", "")
     wake_command = cfg_data.get("wake_command", "")
     wake_on_event = cfg_data.get("wake_on_event", True)
-    ws_port = cfg_data.get("ws_port", 18800)
-    ws_url = f"ws://127.0.0.1:{ws_port}"
-    processor = EventProcessor(DATA_DIR, self_id, wake_command, wake_on_event)
+    group_trigger = cfg_data.get("group_trigger_word", "")
+    private_trigger = cfg_data.get("private_trigger", "")
+    processor = EventProcessor(DATA_DIR, self_id, wake_command, wake_on_event,
+        group_trigger_word=group_trigger,
+        private_trigger=private_trigger,
+    )
     cache = EventCache(DATA_DIR)
 
     # PID file

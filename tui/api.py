@@ -16,6 +16,7 @@ class ChatItem:
     id: str              # group_id or user_id
     name: str            # display name
     kind: str            # "group" or "private"
+    remark: str = ""     # remark set by user for friends
     last_message: str = ""
     last_sender: str = ""
     last_time: int = 0

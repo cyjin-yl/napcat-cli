@@ -4,8 +4,10 @@ from __future__ import annotations
 from datetime import datetime
 from typing import TYPE_CHECKING
 
+from textual.events import ListViewSelected
 from textual.screen import Screen
 from textual.widgets import ListView, ListItem, Label
+from textual.containers import Vertical
 
 if TYPE_CHECKING:
     from .app import NapCatApp
@@ -29,7 +31,7 @@ class ChatListScreen(Screen):
         height: 1fr;
     }
     ListItem {
-        height: 3;
+        height: 4;
         padding: 0 1;
     }
     ListItem:hover {
@@ -42,8 +44,8 @@ class ChatListScreen(Screen):
 
     BINDINGS = [
         ("escape", "back", "Back"),
-        ("enter", "select", "Open"),
         ("/", "slash", "Command"),
+        ("ctrl+q", "quit", "Quit"),
     ]
 
     def compose(self) -> None:
@@ -56,40 +58,56 @@ class ChatListScreen(Screen):
     def action_back(self) -> None:
         self._app().exit()
 
-    def action_select(self) -> None:
-        listview = self.query_one("#chat-listview", ListView)
-        idx = listview.index
-        if idx >= 0:
-            children = list(listview.children)
-            if idx < len(children):
-                item = children[idx]
-                chat_id = getattr(item, "chat_id", None)
-                chat_name = getattr(item, "chat_name", None)
-                chat_type = getattr(item, "chat_type", None)
-                if chat_id:
-                    from .chat_view import ChatViewScreen
-                    self._app().push_screen(
-                        ChatViewScreen(
-                            chat_id=chat_id,
-                            chat_name=chat_name or "",
-                            chat_type=chat_type or "private",
-                        )
-                    )
+    def on_list_view_selected(self, event: ListViewSelected[ListItem]) -> None:
+        """Open chat when a list item is selected (Enter key via ListView)."""
+        item = event.item
+        chat_id = getattr(item, "chat_id", None)
+        chat_name = getattr(item, "chat_name", None)
+        chat_type = getattr(item, "chat_type", None)
+        if chat_id:
+            self._open_chat(chat_id, chat_name or "", chat_type or "private")
+
+    def _open_chat(self, chat_id: str, chat_name: str, chat_type: str) -> None:
+        """Decrement unread count and push the chat view screen."""
+        app = self._app()
+        chat_item = app.chats.get(chat_id)
+        if chat_item:
+            chat_item.unread = 0
+        from .chat_view import ChatViewScreen
+        app.push_screen(
+            ChatViewScreen(
+                chat_id=chat_id,
+                chat_name=chat_name,
+                chat_type=chat_type,
+            )
+        )
 
     async def action_slash(self) -> None:
         self._app().push_screen("slash")
 
     def _refresh_list(self) -> None:
         """Refresh the chat list from app state."""
-        listview = self.query_one("#chat-listview", ListView)
         app = self._app()
+
+        # Show only new alerts — deduplicate by stable signature
+        for alert in app.alerts:
+            sig = NapCatApp._alert_signature(alert)
+            if sig not in app._seen_alerts:
+                app._seen_alerts.add(sig)
+                summary = alert.get("summary", alert.get("message", "Unknown"))
+                self.app.notify(f"\u26a0 {summary}", severity="warning")
+
+        listview = self.query_one("#chat-listview", ListView)
+
+        # Save current selection index before clearing
+        old_index = listview.index if listview.index is not None else 0
 
         sorted_items = sorted(app.chats.values(), key=lambda c: c.last_time, reverse=True)
 
-        items: list[ListItem] = []
+            sig = app._alert_signature(alert)
         for chat in sorted_items:
-            label = self._format_label(chat)
-            li = ListItem(Label(label))
+            name_label, msg_label = self._format_item(chat)
+            li = ListItem(Vertical(name_label, msg_label, classes="item-vbox"))
             li.chat_id = chat.id  # type: ignore[attr-defined]
             li.chat_name = chat.name  # type: ignore[attr-defined]
             li.chat_type = chat.kind  # type: ignore[attr-defined]
@@ -98,22 +116,36 @@ class ChatListScreen(Screen):
             items.append(li)
 
         listview.clear()
-        # ListView.extend is async; use run_worker
-        self.run_worker(self._extend_listview(listview, items))
+        self.run_worker(self._extend_listview(listview, items, old_index))
 
-    async def _extend_listview(self, listview: ListView, items: list[ListItem]) -> None:
+    async def _extend_listview(self, listview: ListView, items: list[ListItem], old_index: int) -> None:
         await listview.extend(items)
+        # Restore selection index after items are mounted
+        listview.index = min(old_index, max(0, len(items) - 1))
 
-    def _format_label(self, chat) -> str:
-        prefix = "群" if chat.kind == "group" else ""
-        name = f"{prefix}{chat.name}"
-        time_str = ""
+    def _format_item(self, chat) -> tuple[Label, Label]:
+        """Return (name_label, msg_label) for a chat item."""
+        if chat.kind == "group":
+            name = f"群[{chat.name}]"
+        else:
+            remark = chat.remark
+            qq = chat.id
+            name = f"{qq} [{remark}]" if remark else f"{qq}"
+        badge = f" [{chat.unread}]" if chat.unread > 0 else ""
+        name_label = Label(f"{name}{badge}")
+        # Second line: time + sender + last message
+        parts = []
         if chat.last_time:
             dt = datetime.fromtimestamp(chat.last_time)
-            time_str = dt.strftime("%H:%M")
-        msg = chat.last_message[:30] if chat.last_message else ""
-        badge = f" [{chat.unread}]" if chat.unread > 0 else ""
-        return f"{name:<20} {time_str}  {msg}{badge}"
+            parts.append(dt.strftime("%H:%M"))
+        sender = chat.last_sender
+        if sender:
+            parts.append(f"{sender}:")
+        msg = (chat.last_message or "")[:40]
+        if msg:
+            parts.append(msg)
+        msg_label = Label(" ".join(parts))
+        return name_label, msg_label
 
     def _app(self) -> "NapCatApp":
         return self.app  # type: ignore[return-value]

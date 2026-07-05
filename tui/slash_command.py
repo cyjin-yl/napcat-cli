@@ -87,14 +87,14 @@ class SlashCommandModal(ModalScreen[str | None]):
                 self._selected_completion = max(0, self._selected_completion - 1)
                 self._highlight_completion()
             else:
-                self.query_one("#slash-output", RichLog).scroll_up()
+                self.query_one("#slash-output", RichLog).scroll_relative(-1)
         elif event.key == "down":
             if self._has_completions():
                 event.prevent_default()
                 self._selected_completion = min(len(self._completions) - 1, self._selected_completion + 1)
                 self._highlight_completion()
             else:
-                self.query_one("#slash-output", RichLog).scroll_down()
+                self.query_one("#slash-output", RichLog).scroll_relative(1)
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id == "slash-input":

@@ -29,6 +29,8 @@ class NapCatConfig:
     event_dir: str = "events"
     alert_dir: str = "alerts"
     log_file: str = "daemon.log"
+    group_trigger_word: str = ""
+    private_trigger: str = "*"
 
     def save(self) -> None:
         """Save config to file."""

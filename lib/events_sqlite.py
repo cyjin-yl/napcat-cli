@@ -38,40 +38,58 @@ def get_connection(data_dir: Path | None = None) -> sqlite3.Connection:
 
 def init_db(conn: sqlite3.Connection) -> None:
     """Initialize the database schema if tables don't exist."""
-    conn.executescript("""
-        CREATE TABLE IF NOT EXISTS events (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp INTEGER NOT NULL,
-            post_type TEXT NOT NULL,
-            event_type TEXT NOT NULL,
-            raw_json TEXT NOT NULL,
-            self_id INTEGER,
-            group_id INTEGER,
-            user_id INTEGER,
-            message_type TEXT,
-            sender_id INTEGER,
-            created_at INTEGER NOT NULL
-        );
+    conn.executescript(
+        "CREATE TABLE IF NOT EXISTS events ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "timestamp INTEGER NOT NULL, "
+        "post_type TEXT NOT NULL, "
+        "event_type TEXT NOT NULL, "
+        "raw_json TEXT NOT NULL, "
+        "self_id INTEGER, "
+        "group_id INTEGER, "
+        "user_id INTEGER, "
+        "message_id INTEGER, "
+        "message_type TEXT, "
+        "sender_id INTEGER, "
+        "created_at INTEGER NOT NULL"
+        "); "
 
-        CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp DESC);
-        CREATE INDEX IF NOT EXISTS idx_events_post_type ON events(post_type);
-        CREATE INDEX IF NOT EXISTS idx_events_event_type ON events(event_type);
-        CREATE INDEX IF NOT EXISTS idx_events_group_id ON events(group_id);
-        CREATE INDEX IF NOT EXISTS idx_events_user_id ON events(user_id);
-        CREATE INDEX IF NOT EXISTS idx_events_sender_id ON events(sender_id);
+        "CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp DESC); "
+        "CREATE INDEX IF NOT EXISTS idx_events_post_type ON events(post_type); "
+        "CREATE INDEX IF NOT EXISTS idx_events_event_type ON events(event_type); "
+        "CREATE INDEX IF NOT EXISTS idx_events_group_id ON events(group_id); "
+        "CREATE INDEX IF NOT EXISTS idx_events_user_id ON events(user_id); "
+        "CREATE INDEX IF NOT EXISTS idx_events_sender_id ON events(sender_id); "
 
-        CREATE TABLE IF NOT EXISTS alerts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            timestamp INTEGER NOT NULL,
-            raw_json TEXT NOT NULL,
-            created_at INTEGER NOT NULL
-        );
+        "CREATE TABLE IF NOT EXISTS alerts ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "name TEXT NOT NULL, "
+        "timestamp INTEGER NOT NULL, "
+        "raw_json TEXT NOT NULL, "
+        "created_at INTEGER NOT NULL"
+        "); "
 
-        CREATE INDEX IF NOT EXISTS idx_alerts_name ON alerts(name);
-        CREATE INDEX IF NOT EXISTS idx_alerts_timestamp ON alerts(timestamp DESC);
-    """)
+        "CREATE INDEX IF NOT EXISTS idx_alerts_name ON alerts(name); "
+        "CREATE INDEX IF NOT EXISTS idx_alerts_timestamp ON alerts(timestamp DESC);"
+    )
     conn.commit()
+
+    # Schema migration: add columns missing from older databases
+    for col, ctype in (("message_id", "INTEGER DEFAULT NULL"),):
+        try:
+            conn.execute(f"ALTER TABLE events ADD COLUMN {col} {ctype}")
+        except sqlite3.OperationalError:
+            pass
+    conn.commit()
+
+    # Ensure index exists (may fail if table was old but column was added manually)
+    try:
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_events_message_id ON events(message_id)"
+        )
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -86,23 +104,23 @@ def write_event(conn: sqlite3.Connection, event: dict[str, Any]) -> int:
     event_type = event.get("notice_type", event.get("request_type", event.get("meta_event_type", post_type)))
     raw_json = json.dumps(event, ensure_ascii=False)
 
-    # Extract indexed fields
     self_id = event.get("self_id")
     group_id = event.get("group_id")
     user_id = event.get("user_id")
+    message_id = event.get("message_id")
     message_type = event.get("message_type")
     sender_id = event.get("sender", {}).get("user_id") if "sender" in event else None
 
-    conn.execute(
-        """INSERT INTO events
-           (timestamp, post_type, event_type, raw_json, self_id, group_id, user_id,
-            message_type, sender_id, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+    cursor = conn.execute(
+        "INSERT INTO events "
+        "(timestamp, post_type, event_type, raw_json, self_id, group_id, user_id, "
+        "message_id, message_type, sender_id, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (ts, post_type, event_type, raw_json, self_id, group_id, user_id,
-         message_type, sender_id, now),
+         message_id, message_type, sender_id, now),
     )
     conn.commit()
-    return conn.total_changes  # approximate
+    return cursor.lastrowid
 
 
 def write_alert(conn: sqlite3.Connection, name: str, data: dict[str, Any]) -> int:
@@ -111,12 +129,12 @@ def write_alert(conn: sqlite3.Connection, name: str, data: dict[str, Any]) -> in
     raw_json = json.dumps(data, ensure_ascii=False)
     alert_ts = data.get("timestamp", now)
 
-    conn.execute(
+    cursor = conn.execute(
         "INSERT INTO alerts (name, timestamp, raw_json, created_at) VALUES (?, ?, ?, ?)",
         (name, alert_ts, raw_json, now),
     )
     conn.commit()
-    return conn.total_changes
+    return cursor.lastrowid
 
 
 # ---------------------------------------------------------------------------
@@ -184,11 +202,12 @@ def read_alerts(
 def clear_alerts(conn: sqlite3.Connection, name: str | None = None) -> int:
     """Clear alerts. If name is given, clear only that alert type.
     Returns count of deleted rows."""
+    cur = conn
     if name:
-        conn.execute("DELETE FROM alerts WHERE name = ?", (name,))
+        cur = conn.execute("DELETE FROM alerts WHERE name = ?", (name,))
     else:
-        conn.execute("DELETE FROM alerts")
-    deleted = conn.rowcount
+        cur = conn.execute("DELETE FROM alerts")
+    deleted = cur.rowcount
     conn.commit()
     return deleted
 
@@ -206,9 +225,9 @@ def get_alert_count(conn: sqlite3.Connection, name: str | None = None) -> int:
 
 
 def prune_events(conn: sqlite3.Connection, older_than_days: int = 7) -> int:
-    """Remove events older than specified days. Returns count deleted."""
+    """Remove events older than specified days."""
     cutoff = int(time.time()) - (older_than_days * 86400)
-    conn.execute("DELETE FROM events WHERE timestamp < ?", (cutoff,))
-    deleted = conn.rowcount
+    cur = conn.execute("DELETE FROM events WHERE timestamp < ?", (cutoff,))
+    deleted = cur.rowcount
     conn.commit()
     return deleted
