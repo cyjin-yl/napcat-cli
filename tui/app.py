@@ -61,20 +61,23 @@ class NapCatApp(App):
             # Build/update chat items from friends and groups
             for f in friends:
                 fid = str(f.get("user_id", ""))
-                self.chats[fid] = ChatItem(
+                self.chats.setdefault(fid, ChatItem(
                     id=fid,
                     name=f.get("nickname", fid),
                     kind="private",
                     remark=f.get("remark", ""),
-                )
+                ))
+                self.chats[fid].name = f.get("nickname", fid)
+                self.chats[fid].remark = f.get("remark", "")
 
             for g in groups:
                 gid = str(g.get("group_id", ""))
-                self.chats[gid] = ChatItem(
+                self.chats.setdefault(gid, ChatItem(
                     id=gid,
                     name=g.get("group_name", gid),
                     kind="group",
-                )
+                ))
+                self.chats[gid].name = g.get("group_name", gid)
 
             # Update last message / unread from events
             for ev in events:

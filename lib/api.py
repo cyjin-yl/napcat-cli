@@ -15,10 +15,11 @@ from .config import get_config, DATA_DIR
 class NapCatAPI:
     """HTTP client for NapCat OneBot 11 API."""
 
-    def __init__(self, api_url: str | None = None, token: str | None = None):
+    def __init__(self, api_url: str | None = None, token: str | None = None, timeout: int | None = None):
         cfg = get_config()
         self.api_url = (api_url or os.environ.get("NAPCAT_API_URL") or cfg.api_url).rstrip("/")
         self.token = token or os.environ.get("NAPCAT_TOKEN") or cfg.token
+        self.timeout = timeout if timeout is not None else 30
         self.echo_counter = 0
 
     def _next_echo(self) -> str:
@@ -26,18 +27,20 @@ class NapCatAPI:
         import secrets
         return secrets.token_hex(6)
 
-    def request(self, endpoint: str, method: str = "POST", json_body: dict | None = None) -> dict:
+    def request(self, endpoint: str, method: str = "POST", json_body: dict | None = None, timeout: int | None = None) -> dict:
         """Make a raw API request.
 
         Args:
             endpoint: API endpoint name (e.g., "get_login_info", ".send_poke")
             method: HTTP method
             json_body: JSON body for POST/PUT requests
+            timeout: Per-call timeout in seconds. Falls back to self.timeout (default 30).
 
         Returns:
             Parsed JSON response as dict.
         """
         url = f"{self.api_url}/{endpoint}"
+        call_timeout = timeout if timeout is not None else self.timeout
 
         body = b""
         if method.upper() in ("POST", "PUT", "PATCH") and json_body is not None:
@@ -49,7 +52,7 @@ class NapCatAPI:
             req.add_header("Authorization", f"Bearer {self.token}")
 
         try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
+            with urllib.request.urlopen(req, timeout=call_timeout) as resp:
                 raw = resp.read().decode("utf-8")
                 return json.loads(raw)
         except urllib.error.HTTPError as e:
@@ -112,7 +115,7 @@ class NapCatAPI:
         if hasattr(self, "_online_cache") and (now - self._online_cache["ts"]) < _cache_ttl:
             return self._online_cache["online"]
 
-        result = self.request("get_status", method="POST", json_body={})
+        result = self.request("get_status", method="POST", json_body={}, timeout=5)
         data = result.get("data", {})
         online = bool(data.get("online", False))
         self._online_cache = {"ts": now, "online": online}
@@ -160,17 +163,17 @@ class NapCatAPI:
         self._unsupported_apis.add(action)
 
 
-    def call(self, action: str, **params: Any) -> dict:
+    def call(self, action: str, timeout: int | None = None, **params: Any) -> dict:
         """Call an API action with parameters.
 
         Args:
             action: Action name (e.g., "send_msg", "get_group_info")
+            timeout: Per-call timeout in seconds. Falls back to self.timeout.
             **params: Action parameters
 
         Returns:
             Parsed JSON response.
         """
-        # Check if API is known unsupported
         if self.is_api_supported(action) is False:
             return {
                 "status": "failed",
@@ -181,7 +184,7 @@ class NapCatAPI:
             }
 
         normalized = self._normalize(params)
-        result = self.request(action, json_body=normalized)
+        result = self.request(action, json_body=normalized, timeout=timeout)
 
         # Detect unsupported API responses and cache them
         if result.get("message", "") == "不支持的Api" or "不支持的Api" in str(result.get("wording", "")):

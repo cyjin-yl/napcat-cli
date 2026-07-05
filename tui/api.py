@@ -98,10 +98,13 @@ class DaemonClient:
             params["user_id"] = str(target_id)
             action = "napcat_get_friend_msg_history"
         if start_id:
-            params["message_id"] = start_id
+            params["message_seq"] = start_id
         result = await self.call(action, params)
         if result.get("retcode") == 0:
-            return result.get("data", [])
+            data = result.get("data") or []
+            if isinstance(data, dict):
+                return data.get("messages", [])
+            return data
         return []
 
     async def send_message(self, message_type: str, target_id: str, message: str) -> dict:

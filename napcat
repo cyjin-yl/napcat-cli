@@ -3,7 +3,7 @@
 
 Usage:
     napcat api <endpoint> [--data JSON] [--method POST|GET]
-    napcat send <group|private> <id> <message> [--file FILE] [--at USERS]
+    napcat send <group|private> <id> -m "<message>" [--file FILE] [--at USERS]
     napcat recall <message_id> [--group GROUP]
     napcat group <command> [args...]
     napcat friend <command> [args...]
@@ -34,6 +34,14 @@ from lib.api import NapCatAPI
 from lib.config import get_config, DATA_DIR
 from lib.events import EventsReader
 
+
+
+def require_online(api: NapCatAPI) -> bool:
+    """Check bot is online; print error and return False if offline."""
+    if not api.is_online():
+        print("Error: bot is offline. Check 'napcat status' or restart NapCat.", file=sys.stderr)
+        return False
+    return True
 
 def cmd_api(args: argparse.Namespace, api: NapCatAPI) -> int:
     """napcat api - Raw API access like 'gh api'."""
@@ -66,9 +74,7 @@ def cmd_api(args: argparse.Namespace, api: NapCatAPI) -> int:
 
 def cmd_send(args: argparse.Namespace, api: NapCatAPI) -> int:
     """napcat send - Send a message."""
-    # Check online status before sending
-    if not api.is_online():
-        print("Error: bot is offline. Check 'napcat status' or restart NapCat.", file=sys.stderr)
+    if not require_online(api):
         return 1
 
     msg_type = "group" if args.target_type == "group" else "private"
@@ -82,25 +88,30 @@ def cmd_send(args: argparse.Namespace, api: NapCatAPI) -> int:
 
     if args.file:
         file_path = args.file
-        if file_path.startswith(("http://", "https://", "file:///", "base64://")):
+        orig_name = Path(file_path).name
+        if file_path.startswith(("http://", "https://", "file://", "base64://")):
             pass
         elif Path(file_path).exists():
-            file_path = "file:///" + Path(file_path).resolve()
+            file_path = "file://" + str(Path(file_path).resolve())
         else:
             print(f"Warning: file not found '{args.file}', sending as-is (NapCat may reject)", file=sys.stderr)
-        segments.append({"type": "file", "data": {"file": file_path, "name": Path(file_path).name}})
+        segments.append({"type": "file", "data": {"file": file_path, "name": orig_name}})
     elif args.image:
         image_path = args.image
-        if image_path.startswith(("http://", "https://", "file:///", "base64://")):
+        if image_path.startswith(("http://", "https://", "file://", "base64://")):
             pass
         elif Path(image_path).exists():
-            image_path = "file:///" + Path(image_path).resolve()
+            image_path = "file://" + str(Path(image_path).resolve())
         else:
-            print(f"Warning: image not found '{args.image}', sending as-is (NapCat may reject)", file=sys.stderr)
+            print(f"Warning: image not found '{args.image}', sending as-is", file=sys.stderr)
         segments.append({"type": "image", "data": {"file": image_path}})
 
-    # Text message
-    segments.append({"type": "text", "data": {"text": args.message}})
+    if args.message:
+        segments.append({"type": "text", "data": {"text": args.message}})
+
+    if not segments:
+        print("Error: no message content. Provide -m, --file, or --image.", file=sys.stderr)
+        return 1
 
     kwargs: dict = {"message_type": msg_type, "message": segments}
     if msg_type == "group":
@@ -122,6 +133,8 @@ def cmd_send(args: argparse.Namespace, api: NapCatAPI) -> int:
 
 def cmd_recall(args: argparse.Namespace, api: NapCatAPI) -> int:
     """napcat recall - Recall a message."""
+    if not require_online(api):
+        return 1
     kwargs: dict = {"message_id": args.message_id}
     if args.group:
         kwargs["group_id"] = args.group
@@ -139,6 +152,8 @@ def cmd_recall(args: argparse.Namespace, api: NapCatAPI) -> int:
 def cmd_group(args: argparse.Namespace, api: NapCatAPI) -> int:
     """napcat group - Group management."""
     sub = args.subcommand
+    if not require_online(api):
+        return 1
 
     if sub == "info":
         result = api.call("get_group_info", group_id=args.group_id, no_cache=args.no_cache)
@@ -181,6 +196,8 @@ def cmd_group(args: argparse.Namespace, api: NapCatAPI) -> int:
 def cmd_friend(args: argparse.Namespace, api: NapCatAPI) -> int:
     """napcat friend - Friend management."""
     sub = args.subcommand
+    if not require_online(api):
+        return 1
 
     if sub == "list":
         result = api.call("get_friend_list")
@@ -426,9 +443,9 @@ def cmd_status(args: argparse.Namespace, api: NapCatAPI) -> int:
 def cmd_ocr(args: argparse.Namespace, api: NapCatAPI) -> int:
     """napcat ocr - OCR an image."""
     image_path = args.image
-    if not image_path.startswith(("http://", "https://", "file:///", "base64://")):
+    if not image_path.startswith(("http://", "https://", "file://", "base64://")):
         if Path(image_path).exists():
-            image_path = "file:///" + Path(image_path).resolve()
+            image_path = "file://" + str(Path(image_path).resolve())
         else:
             print(f"Error: image file not found: {args.image}", file=sys.stderr)
             return 1
@@ -486,6 +503,7 @@ def main() -> int:
     parser.add_argument("--token", default=None, help="Override NAPCAT_TOKEN")
     parser.add_argument("--data-dir", default=None, help="Override NAPCAT_DATA_DIR")
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
+    parser.add_argument("--timeout", type=int, default=None, help="API request timeout in seconds (default: 30)")
     parser.add_argument("--version", action="version", version="napcat-cli 1.0.0")
 
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
@@ -501,8 +519,8 @@ def main() -> int:
     send_p = subparsers.add_parser("send", help="Send a message")
     send_p.add_argument("target_type", choices=["group", "private"])
     send_p.add_argument("target_id", help="Group ID or user ID")
-    send_p.add_argument("--message", "-m", required=True, help="Message text")
-    send_p.add_argument("--at", nargs="+", help="QQ numbers to @")
+    send_p.add_argument("-m", "--message", default=None, help="Message text")
+    send_p.add_argument("--at", action="append", help="QQ number to @ (repeatable)")
     send_p.add_argument("--file", help="File to send")
     send_p.add_argument("--image", help="Image to send")
 
@@ -674,7 +692,7 @@ def main() -> int:
         os.environ["NAPCAT_DATA_DIR"] = args.data_dir
 
     # Init API client
-    api = NapCatAPI()
+    api = NapCatAPI(timeout=args.timeout)
 
     # Dispatch
     commands = {

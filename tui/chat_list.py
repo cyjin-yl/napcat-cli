@@ -1,16 +1,16 @@
-"""Chat list screen — main conversation list."""
+"""Chat list screen - main conversation list."""
 from __future__ import annotations
 
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from textual.events import ListViewSelected
 from textual.screen import Screen
 from textual.widgets import ListView, ListItem, Label
 from textual.containers import Vertical
 
 if TYPE_CHECKING:
     from .app import NapCatApp
+
 
 
 class ChatListScreen(Screen):
@@ -58,7 +58,7 @@ class ChatListScreen(Screen):
     def action_back(self) -> None:
         self._app().exit()
 
-    def on_list_view_selected(self, event: ListViewSelected[ListItem]) -> None:
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
         """Open chat when a list item is selected (Enter key via ListView)."""
         item = event.item
         chat_id = getattr(item, "chat_id", None)
@@ -91,7 +91,7 @@ class ChatListScreen(Screen):
 
         # Show only new alerts — deduplicate by stable signature
         for alert in app.alerts:
-            sig = NapCatApp._alert_signature(alert)
+            sig = app._alert_signature(alert)
             if sig not in app._seen_alerts:
                 app._seen_alerts.add(sig)
                 summary = alert.get("summary", alert.get("message", "Unknown"))
@@ -104,7 +104,7 @@ class ChatListScreen(Screen):
 
         sorted_items = sorted(app.chats.values(), key=lambda c: c.last_time, reverse=True)
 
-            sig = app._alert_signature(alert)
+        items: list[ListItem] = []
         for chat in sorted_items:
             name_label, msg_label = self._format_item(chat)
             li = ListItem(Vertical(name_label, msg_label, classes="item-vbox"))
@@ -116,11 +116,7 @@ class ChatListScreen(Screen):
             items.append(li)
 
         listview.clear()
-        self.run_worker(self._extend_listview(listview, items, old_index))
-
-    async def _extend_listview(self, listview: ListView, items: list[ListItem], old_index: int) -> None:
-        await listview.extend(items)
-        # Restore selection index after items are mounted
+        listview.extend(items)
         listview.index = min(old_index, max(0, len(items) - 1))
 
     def _format_item(self, chat) -> tuple[Label, Label]:
@@ -134,7 +130,7 @@ class ChatListScreen(Screen):
         badge = f" [{chat.unread}]" if chat.unread > 0 else ""
         name_label = Label(f"{name}{badge}")
         # Second line: time + sender + last message
-        parts = []
+        parts: list[str] = []
         if chat.last_time:
             dt = datetime.fromtimestamp(chat.last_time)
             parts.append(dt.strftime("%H:%M"))

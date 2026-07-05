@@ -51,7 +51,7 @@ The skills-fs integration exposes QQ bot capabilities as an intuitive virtual fi
 ### Filesystem Structure
 
 ```
-~/.hermes/skills/napcat-cli/          # FUSE mountpoint
+~/.napcat-cli/skills/napcat-cli/          # FUSE mountpoint
 ├── SKILL.md                          # Auto-generated skill documentation
 ├── AGENTS.md                         # Agent guide: daemon setup and navigation
 ├── persona.md                        # Bot persona / system prompt artifact
@@ -89,31 +89,31 @@ The skills-fs integration exposes QQ bot capabilities as an intuitive virtual fi
 
 ```bash
 # Check bot status
-cat ~/.hermes/skills/napcat-cli/napcat/status
+cat ~/.napcat-cli/skills/napcat-cli/napcat/status
 
 # Read recent events
-cat ~/.hermes/skills/napcat-cli/napcat/events
+cat ~/.napcat-cli/skills/napcat-cli/napcat/events
 
 # Browse group messages dynamically
-ls ~/.hermes/skills/napcat-cli/napcat/groups
-ls ~/.hermes/skills/napcat-cli/napcat/groups/123456
-cat ~/.hermes/skills/napcat-cli/napcat/groups/123456/AGENTS.md
-ls ~/.hermes/skills/napcat-cli/napcat/groups/123456/recent
-cat ~/.hermes/skills/napcat-cli/napcat/groups/123456/recent/1001
+ls ~/.napcat-cli/skills/napcat-cli/napcat/groups
+ls ~/.napcat-cli/skills/napcat-cli/napcat/groups/123456
+cat ~/.napcat-cli/skills/napcat-cli/napcat/groups/123456/AGENTS.md
+ls ~/.napcat-cli/skills/napcat-cli/napcat/groups/123456/recent
+cat ~/.napcat-cli/skills/napcat-cli/napcat/groups/123456/recent/1001
 
 # Send to a specific group by writing to its send file
-echo '{"message": "Hello group!"}' > ~/.hermes/skills/napcat-cli/napcat/groups/123456/send
+echo '{"message": "Hello group!"}' > ~/.napcat-cli/skills/napcat-cli/napcat/groups/123456/send
 
 # Browse private friend messages
-ls ~/.hermes/skills/napcat-cli/napcat/friends
-ls ~/.hermes/skills/napcat-cli/napcat/friends/987654
-cat ~/.hermes/skills/napcat-cli/napcat/friends/987654/recent/2001
+ls ~/.napcat-cli/skills/napcat-cli/napcat/friends
+ls ~/.napcat-cli/skills/napcat-cli/napcat/friends/987654
+cat ~/.napcat-cli/skills/napcat-cli/napcat/friends/987654/recent/2001
 
 # Send to a specific friend
-echo '{"message": "Hi!"}' > ~/.hermes/skills/napcat-cli/napcat/friends/987654/send
+echo '{"message": "Hi!"}' > ~/.napcat-cli/skills/napcat-cli/napcat/friends/987654/send
 
 # Clear a specific alert
-echo '{"name": "NEW_MESSAGE"}' > ~/.hermes/skills/napcat-cli/napcat/clear_alert
+echo '{"name": "NEW_MESSAGE"}' > ~/.napcat-cli/skills/napcat-cli/napcat/clear_alert
 ```
 
 ## CLI Usage
@@ -131,8 +131,8 @@ napcat group list
 napcat group members <group_id>
 
 # Send messages
-napcat send group <group_id> <message>
-napcat send private <user_id> <message>
+napcat send group <group_id> -m "<message>" [--at USER_ID]
+napcat send private <user_id> -m "<message>"
 
 # Message management
 napcat recall <message_id> [--group <group_id>]
@@ -206,16 +206,9 @@ napcat daemon stop
 
 5. **Configure**
    ```bash
-   # Edit config if needed
-   cat > ~/.config/napcat-cli.json << EOF
-   {
-     "napcat": {
-       "http_url": "http://127.0.0.1:18801",
-       "ws_url": "ws://127.0.0.1:18800",
-       "token": ""
-     }
-   }
-   EOF
+   napcat config set api_url http://127.0.0.1:18801
+   napcat config set token ""
+   napcat config set self_id 123456789
    ```
 
 ## Configuration
@@ -231,27 +224,27 @@ napcat daemon stop
 A sample `skills-fs-config.json` is shipped in the repository root. Copy it to the runtime location and adjust the home path if needed:
 
 ```bash
-cp skills-fs-config.json ~/.hermes/skills-fs.json
+cp skills-fs-config.json ~/.napcat-cli/skills-fs.json
 ```
 
 Key configuration points:
 
-- **FUSE mountpoint** — Start `skills-fs` with `--mountpoint ~/.hermes/skills/napcat-cli` (no `-fs` suffix). The generated `SKILL.md` is exposed at the FUSE root via `exposeAtRoot: true`.
+- **FUSE mountpoint** — Start `skills-fs` with `--mountpoint ~/.napcat-cli/skills/napcat-cli` (no `-fs` suffix). The generated `SKILL.md` is exposed at the FUSE root via `exposeAtRoot: true`.
 - **Payload forwarding** — Every write-enabled API mount uses `"writeParams": "json"` so that the JSON written to the file is forwarded as provider parameters.
 - **Persona artifact** — `persona.md` is mounted as a blob at `/persona.md`.
 
-Note: because `skillsRoot` is `~/.hermes/skills`, the skill generator writes `SKILL.md` to `~/.hermes/skills/napcat-cli/SKILL.md` before the FUSE daemon mounts. After FUSE mounts, that on-disk file is hidden and replaced by the virtual `/SKILL.md` exposed by `exposeAtRoot: true`. This is expected.
+Note: because `skillsRoot` is `~/.napcat-cli/skills`, the skill generator writes `SKILL.md` to `~/.napcat-cli/skills/napcat-cli/SKILL.md` before the FUSE daemon mounts. After FUSE mounts, that on-disk file is hidden and replaced by the virtual `/SKILL.md` exposed by `exposeAtRoot: true`. This is expected.
 
 ### Running skills-fs
 
 ```bash
-skills-fs fuse --config ~/.hermes/skills-fs.json \
-  --mountpoint ~/.hermes/skills/napcat-cli \
+skills-fs fuse --config ~/.napcat-cli/skills-fs.json \
+  --mountpoint ~/.napcat-cli/skills/napcat-cli \
   --allow-other \
-  --log-file ~/.hermes/skills-fuse.log
+  --log-file ~/.napcat-cli/skills-fuse.log
 ```
 
-If you need to validate or regenerate the config while FUSE is already mounted, unmount it first (e.g. `fusermount3 -u ~/.hermes/skills/napcat-cli`), then validate and remount.
+If you need to validate or regenerate the config while FUSE is already mounted, unmount it first (e.g. `fusermount3 -u ~/.napcat-cli/skills/napcat-cli`), then validate and remount.
 
 Example minimal config snippet:
 
@@ -260,7 +253,7 @@ Example minimal config snippet:
   "providers": [
     { "id": "napcat", "url": "http://127.0.0.1:18821/invoke" }
   ],
-  "skillsRoot": "$HOME/.hermes/skills",
+  "skillsRoot": "$HOME/.napcat-cli/skills",
   "skills": [
     {
       "name": "napcat-cli",
@@ -352,7 +345,7 @@ napcat status
 napcat group list
 
 # Test daemon
-python3 daemon/watch.py ~/.config/napcat-daemon.json
+python3 daemon/watch.py ~/.napcat-data/daemon.json
 
 # Test skills-fs
 cd skills-fs && make test

@@ -5,7 +5,7 @@
       "url": "http://127.0.0.1:18821/invoke"
     }
   ],
-  "skillsRoot": "$HOME/.hermes/skills",
+  "skillsRoot": "$HOME/.napcat-cli/skills",
   "includes": [
     "skills-fs-fragment.json"
   ]

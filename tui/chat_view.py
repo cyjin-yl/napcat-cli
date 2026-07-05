@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 from datetime import datetime
+from subprocess import run
 from typing import TYPE_CHECKING
 
+from textual.app import ComposeResult
 from textual.screen import Screen
 from textual.widgets import Input, Button, RichLog, Label
 from rich.text import Text
-from textual.containers import Horizontal
+from textual.containers import Horizontal, Container
+from textual.binding import Binding
 
 if TYPE_CHECKING:
     from .app import NapCatApp
@@ -24,25 +27,37 @@ class ChatViewScreen(Screen):
         height: 2;
         dock: top;
         background: $primary;
-        color: $primary-foreground;
+        color: $text;
         text-align: center;
     }
     #messages {
         height: 1fr;
-        overflow-y: scroll;
+        overflow: scroll;
         padding: 1;
     }
-    #input-bar {
-        height: 3;
+    #input_bar {
         dock: bottom;
+        height: auto;
         border: solid $accent;
         background: $surface;
     }
-    #input-bar Input {
-        width: 80%;
+    #cmd_row, #msg_row {
+        height: 1;
+        width: 1fr;
     }
-    #input-bar Button {
-        width: 15%;
+    #send-btn {
+        width: 4;
+    }
+    #msg-input {
+        width: 1fr;
+        margin: 0 1;
+    }
+    #cmd-input {
+        width: 1fr;
+        margin: 0 1;
+    }
+    #cmd-btn {
+        width: 3;
     }
     """
 
@@ -52,7 +67,7 @@ class ChatViewScreen(Screen):
         ("down", "scroll_down", "Down"),
         ("pageup", "page_up", "PgUp"),
         ("pagedown", "page_down", "PgDn"),
-        ("/", "slash", "Command"),
+        Binding("/", "slash", "Cmd", priority=True),
     ]
 
     def __init__(
@@ -63,26 +78,44 @@ class ChatViewScreen(Screen):
         self.chat_name = chat_name
         self.chat_type = chat_type
         self._last_message_time: float = 0
+        self._loaded_message_ids: set[str] = set()
 
-    def compose(self) -> None:
+    def compose(self) -> ComposeResult:
         yield Label(f"  {self.chat_name}", id="view-header")
         yield RichLog(id="messages")
-        yield Horizontal(
-            Input(placeholder="输入消息...", id="msg-input"),
-            Button("发送", id="send-btn"),
-            id="input-bar",
+        yield Container(
+            Horizontal(
+                Input(placeholder="napcat 命令...", id="cmd-input"),
+                Button("执行", id="cmd-btn"),
+                id="cmd_row",
+            ),
+            Horizontal(
+                Input(placeholder="输入消息...", id="msg-input"),
+                Button("发送", id="send-btn"),
+                id="msg_row",
+            ),
+            id="input_bar",
         )
 
     def on_mount(self) -> None:
         self._load_messages()
+        self.query_one("#msg-input", Input).focus()
+
+    def action_slash(self) -> None:
+        """Focus the command input bar."""
+        self.query_one("#cmd-input", Input).focus()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "send-btn":
             self._send_message()
+        elif event.button.id == "cmd-btn":
+            self._execute_command()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id == "msg-input":
             self._send_message()
+        elif event.input.id == "cmd-input":
+            self._execute_command()
 
     def action_back(self) -> None:
         self._app().pop_screen()
@@ -96,6 +129,7 @@ class ChatViewScreen(Screen):
 
         rich_log = self.query_one("#messages", RichLog)
         rich_log.clear()
+        self._loaded_message_ids.clear()
 
         try:
             from ..lib.config import get_config
@@ -106,10 +140,21 @@ class ChatViewScreen(Screen):
 
         sorted_msgs = sorted(msgs, key=lambda m: m.get("time", 0))
 
+        # Track loaded message IDs for dedup
         for m in sorted_msgs:
-            self._write_message_line(rich_log, m, self_id)
+            mid = self._get_msg_id(m)
+            if mid:
+                self._loaded_message_ids.add(mid)
 
-        rich_log.scroll_end()
+        # Batch write all messages at once for performance
+        parts = []
+        for m in sorted_msgs:
+            line = self._format_message_line(m, self_id)
+            parts.append(line)
+
+        if parts:
+            rich_log.write(Text.from_markup("\n".join(parts)), scroll_end=True)
+
         if sorted_msgs:
             self._last_message_time = max(m.get("time", 0) for m in sorted_msgs)
 
@@ -125,7 +170,12 @@ class ChatViewScreen(Screen):
         client = self._app().client
         result = await client.send_message(self.chat_type, self.chat_id, text)
 
-        # Single timestamp for display, dedup cutoff, and chat metadata.
+        # Track server-assigned message ID if available
+        if isinstance(result, dict):
+            server_id = str(result.get("message_id", "")) or str(result.get("message_seq", ""))
+            if server_id:
+                self._loaded_message_ids.add(server_id)
+
         ts = datetime.now().timestamp()
         now_str = datetime.fromtimestamp(ts).strftime("%H:%M")
 
@@ -138,26 +188,36 @@ class ChatViewScreen(Screen):
         if chat:
             chat.last_message = text
             chat.last_time = int(ts)
+
     def _refresh_messages(self) -> None:
         """Append new messages from daemon when polling detects changes."""
         self.run_worker(self._append_new_messages())
 
     async def _append_new_messages(self) -> None:
-        """Fetch fresh messages and append only those newer than last load."""
+        """Fetch fresh messages and append only those newer than last load, deduped by ID."""
         client = self._app().client
         msgs = await client.get_message_history(self.chat_type, self.chat_id, count=100)
 
         rich_log = self.query_one("#messages", RichLog)
         at_end = rich_log.at_bottom
 
-        # Filter to only messages newer than last load
-        new_msgs = [m for m in msgs if m.get("time", 0) > self._last_message_time]
+        # Filter: newer than last load AND not already loaded by ID
+        new_msgs = [
+            m for m in msgs
+            if m.get("time", 0) > self._last_message_time
+            and self._get_msg_id(m) not in self._loaded_message_ids
+        ]
 
         if not new_msgs:
             return
 
-        # Sort by time so ordering is preserved
         new_msgs = sorted(new_msgs, key=lambda m: m.get("time", 0))
+
+        for m in new_msgs:
+            mid = self._get_msg_id(m)
+            if mid:
+                self._loaded_message_ids.add(mid)
+            self._last_message_time = max(self._last_message_time, m.get("time", 0))
 
         try:
             from ..lib.config import get_config
@@ -166,15 +226,23 @@ class ChatViewScreen(Screen):
         except Exception:
             self_id = ""
 
+        # Batch write all new messages at once
+        parts = []
         for m in new_msgs:
-            self._write_message_line(rich_log, m, self_id)
-            self._last_message_time = max(self._last_message_time, m.get("time", 0))
+            line = self._format_message_line(m, self_id)
+            parts.append(line)
 
-        if at_end:
-            rich_log.scroll_end()
+        if parts:
+            rich_log.write(Text.from_markup("\n".join(parts)))
+            if at_end:
+                rich_log.scroll_end()
 
-    def _write_message_line(self, rich_log: RichLog, m: dict, self_id: str, *, scroll_end: bool = False) -> None:
-        """Render a single message line into the RichLog."""
+    def _get_msg_id(self, m: dict) -> str:
+        """Extract a stable message ID for deduplication."""
+        return str(m.get("message_id", "")) or str(m.get("message_seq", ""))
+
+    def _format_message_line(self, m: dict, self_id: str) -> str:
+        """Format a single message into a Rich markup line."""
         sender = m.get("sender", {})
         sender_name = ""
         sender_uid = ""
@@ -197,8 +265,22 @@ class ChatViewScreen(Screen):
 
         is_self = sender_uid == self_id
         prefix = "[green]我[/green]" if is_self else f"[blue]{sender_name}[/blue]"
-        line = f"{prefix} {time_str}\n{content}"
-        rich_log.write(Text.from_markup(line), scroll_end=scroll_end)
+        return f"{prefix} {time_str}\n{content}"
+
+    def _execute_command(self) -> None:
+        input_widget = self.query_one("#cmd-input", Input)
+        cmd = input_widget.value.strip()
+        if not cmd:
+            return
+        input_widget.value = ""
+        self.run_worker(self._execute_command_worker(cmd))
+
+    async def _execute_command_worker(self, cmd: str) -> None:
+        """Execute a napcat CLI command and show output in messages."""
+        result = run(["napcat"] + cmd.split(), capture_output=True, text=True, timeout=30)
+        output = result.stdout or result.stderr or "(no output)"
+        rich_log = self.query_one("#messages", RichLog)
+        rich_log.write(Text.from_markup(f"[bold cyan]⚡ {cmd}[/bold cyan]\n{output}"), scroll_end=True)
 
     def action_scroll_down(self) -> None:
         self.query_one("#messages", RichLog).scroll_down()
@@ -211,9 +293,6 @@ class ChatViewScreen(Screen):
 
     def action_page_down(self) -> None:
         self.query_one("#messages", RichLog).page_down()
-
-    async def action_slash(self) -> None:
-        self._app().push_screen("slash")
 
     def _app(self) -> "NapCatApp":
         return self.app  # type: ignore[return-value]

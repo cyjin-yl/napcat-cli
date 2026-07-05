@@ -29,6 +29,7 @@ import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 # Allow running from any directory
 ROOT = Path(__file__).resolve().parent.parent
@@ -551,6 +552,83 @@ class NapCatHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(message.encode("utf-8"))
 
+
+    def do_GET(self) -> None:
+        """Handle GET requests with parameterized query support.
+
+        Supports:
+        - GET /events?since=&type=&limit=&post_type=
+        - GET /alerts?name=&limit=
+        - GET /invoke?action=...&param=value  (read-only API actions proxied via GET)
+        - GET /status  (bot online status)
+        """
+        parsed = urlparse(self.path)
+        path = parsed.path
+        qs = parse_qs(parsed.query)
+
+        def _first(k: str, default: str = "") -> str:
+            return qs.get(k, [default])[0]
+
+        def _int(k: str, default: int = 0) -> int:
+            try:
+                return int(_first(k, str(default)))
+            except ValueError:
+                return default
+
+        if path == "/events":
+            try:
+                result = self._dispatch("get_events", {
+                    "limit": _int("limit", 50),
+                    "since": _first("since", "") or None,
+                    "post_type": _first("post_type") or None,
+                    "event_type": _first("event_type") or None,
+                })
+                self._send_json(result)
+            except Exception as e:
+                self._send_error(500, str(e))
+            return
+
+        if path == "/alerts":
+            try:
+                result = self._dispatch("get_alerts", {
+                    "name": _first("name") or None,
+                    "limit": _int("limit", 50),
+                })
+                self._send_json(result)
+            except Exception as e:
+                self._send_error(500, str(e))
+            return
+
+        if path == "/status":
+            # No bot_status table - infer online from recent events.
+            recent = self.cache.get(limit=10)
+            online = len(recent) > 0
+            self._send_json({"online": online, "last_event": recent[-1].get("time", None) if recent else None})
+            return
+
+        if path == "/invoke":
+            # GET /invoke only allows read-only actions actually supported by _dispatch.
+            _readable = {
+                "get_events", "get_event", "get_alerts",
+                "list_groups", "list_friends", "list_time_ranges",
+                "list_messages", "get_message", "get_stats",
+            }
+            action = _first("action")
+            if not action:
+                self._send_error(400, "Missing action parameter")
+                return
+            if action not in _readable:
+                self._send_error(403, f"Action '{action}' not allowed via GET (use POST for write actions)")
+                return
+            params = {k: v[0] if len(v) == 1 else v for k, v in qs.items() if k != "action"}
+            try:
+                result = self._dispatch(action, params)
+                self._send_json(result)
+            except Exception as e:
+                self._send_error(500, str(e))
+            return
+
+        self._send_error(404, f"Not found: {path}")
     def do_POST(self) -> None:
         if self.path not in ("/", "/invoke"):
             self._send_error(404, "Not found")
@@ -775,8 +853,10 @@ def run_daemon(config_path: str) -> None:
     pid_file = DATA_DIR / "daemon.pid"
     pid_file.write_text(str(os.getpid()))
 
-    # Determine HTTP port
+    # Determine ports
     http_port = int(cfg_data.get("http_port", os.environ.get("NAPCAT_HTTP_PORT", "18821")))
+    ws_port = int(cfg_data.get("ws_port", os.environ.get("NAPCAT_WS_PORT", "18800")))
+    ws_url = cfg_data.get("ws_url", f"ws://127.0.0.1:{ws_port}")
 
     # Start HTTP provider
     server = run_http_server(processor, cache, http_port)
