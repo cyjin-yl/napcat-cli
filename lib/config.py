@@ -22,8 +22,9 @@ class NapCatConfig:
     token: str = ""
     self_id: str | None = None
     webhook_port: int = 18820
+    ws_port: int = 18800
+    http_port: int = 18821
     wake_on_event: bool = True
-    wake_command: str = ""
     event_dir: str = "events"
     alert_dir: str = "alerts"
     log_file: str = "daemon.log"

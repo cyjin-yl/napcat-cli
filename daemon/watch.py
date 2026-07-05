@@ -45,10 +45,11 @@ from lib.events import EventsWriter, EventsReader
 class EventProcessor:
     """Process events and generate alerts."""
 
-    def __init__(self, data_dir: Path, self_id: str = "", wake_command: str = ""):
+    def __init__(self, data_dir: Path, self_id: str = "", wake_command: str = "", wake_on_event: bool = True):
         self.writer = EventsWriter(data_dir)
         self.self_id = self_id
         self.wake_command = wake_command
+        self.wake_on_event = wake_on_event
         self.log_file = data_dir / "daemon.log"
 
     def log(self, msg: str) -> None:
@@ -398,6 +399,9 @@ class EventProcessor:
             self.log(f"Heartbeat ({interval}s)")
 
     def _wake(self, reason: str) -> None:
+        if not self.wake_on_event:
+            return
+
         self.writer.write_alert("NAPCAT_CLI_NEED_WAKE_UP", {
             "summary": f"Wake up needed: {reason}",
             "reason": reason,
@@ -734,10 +738,10 @@ def run_daemon(config_path: str) -> None:
     cfg_data = json.loads(Path(config_path).read_text())
     self_id = cfg_data.get("self_id", "")
     wake_command = cfg_data.get("wake_command", "")
+    wake_on_event = cfg_data.get("wake_on_event", True)
     ws_port = cfg_data.get("ws_port", 18800)
     ws_url = f"ws://127.0.0.1:{ws_port}"
-
-    processor = EventProcessor(DATA_DIR, self_id, wake_command)
+    processor = EventProcessor(DATA_DIR, self_id, wake_command, wake_on_event)
     cache = EventCache(DATA_DIR)
 
     # PID file
@@ -745,7 +749,7 @@ def run_daemon(config_path: str) -> None:
     pid_file.write_text(str(os.getpid()))
 
     # Determine HTTP port
-    http_port = int(os.environ.get("NAPCAT_HTTP_PORT", "18821"))
+    http_port = int(cfg_data.get("http_port", os.environ.get("NAPCAT_HTTP_PORT", "18821")))
 
     # Start HTTP provider
     server = run_http_server(processor, cache, http_port)
