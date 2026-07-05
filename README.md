@@ -307,6 +307,27 @@ The daemon generates alert files for important events:
 - `NAPCAT_CLI_NEW_REQUEST` — Friend/group request
 - `NAPCAT_CLI_NEED_WAKE_UP` — Composite alert for agent attention
 
+### Wake Command
+
+When `wake_on_event` is `true` in config, the daemon executes `wake_command` for important events (friend requests, group invites, @mentions). The command string supports one variable:
+
+- `$REASON` / `${REASON}` / `{reason}` — replaced with the event reason (e.g. "New friend request from 123456789")
+
+**Examples for different agents:**
+
+```bash
+# Hermes
+napcat config set wake_command "hermes send --to weixin ' QQ事件: \$REASON'"
+napcat config set wake_command "hermes send --to weixin 'QQ事件: \$REASON'"
+# Claude Code (notify via file watch or custom script)
+napcat config set wake_command 'echo "\$REASON" >> ~/.napcat-data/.agent-wake'
+
+# Generic shell script
+napcat config set wake_command '/path/to/notify.sh "\$REASON"'
+```
+
+**Security**: `wake_command` runs verbatim via `shell=True` with the user's privileges. Do not paste untrusted templates.
+
 ### HTTP Provider
 
 Daemon runs HTTP server implementing skills-fs provider contract:

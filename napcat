@@ -219,6 +219,8 @@ def cmd_friend(args: argparse.Namespace, api: NapCatAPI) -> int:
 
 def cmd_file(args: argparse.Namespace, api: NapCatAPI) -> int:
     """napcat file - File operations."""
+    if not require_online(api):
+        return 1
     sub = args.subcommand
 
     if sub == "upload-group":
@@ -258,6 +260,16 @@ def cmd_daemon(args: argparse.Namespace, api: NapCatAPI) -> int:
     daemon_py = ROOT / "daemon" / "watch.py"
 
     if args.subcommand == "start":
+        # Check for existing daemon before starting a new one
+        pid_file = DATA_DIR / "daemon.pid"
+        if pid_file.exists():
+            existing_pid = int(pid_file.read_text().strip())
+            try:
+                os.kill(existing_pid, 0)  # Check if alive without killing
+                print(f"Daemon already running (PID {existing_pid}). Use 'napcat daemon stop' first.", file=sys.stderr)
+                return 1
+            except ProcessLookupError:
+                pid_file.unlink()  # Stale PID file, clean up
         # Write config for daemon
         cfg = get_config()
         cfg_path = DATA_DIR / "daemon.json"
@@ -442,6 +454,8 @@ def cmd_status(args: argparse.Namespace, api: NapCatAPI) -> int:
 
 def cmd_ocr(args: argparse.Namespace, api: NapCatAPI) -> int:
     """napcat ocr - OCR an image."""
+    if not require_online(api):
+        return 1
     image_path = args.image
     if not image_path.startswith(("http://", "https://", "file://", "base64://")):
         if Path(image_path).exists():
@@ -456,6 +470,8 @@ def cmd_ocr(args: argparse.Namespace, api: NapCatAPI) -> int:
 
 def cmd_translate(args: argparse.Namespace, api: NapCatAPI) -> int:
     """napcat translate - QQ translation (may not be available in all NapCat versions)."""
+    if not require_online(api):
+        return 1
     result = api.call("qq_translate", text=args.text, from_lang=args.from_lang, to_lang=args.to_lang)
     if result.get("message") and "不支持" in result.get("message", ""):
         print("Translation API not available in this NapCat version.", file=sys.stderr)

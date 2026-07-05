@@ -52,7 +52,9 @@ class ChatListScreen(Screen):
         yield Label("  QQ 消息", id="header-label")
         yield ListView(id="chat-listview")
 
-    def on_mount(self) -> None:
+    async def on_mount(self) -> None:
+        app = self._app()
+        await app.refresh_data()
         self._refresh_list()
 
     def action_back(self) -> None:

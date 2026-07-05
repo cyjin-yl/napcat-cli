@@ -27,6 +27,7 @@ class NapCatApp(App):
         self.chats: dict[str, ChatItem] = {}
         self.alerts: list[dict[str, Any]] = []
         self._seen_alerts: set[str] = set()
+        self._seen_message_ids: set[str] = set()
 
     @staticmethod
     def _alert_signature(alert: dict[str, Any]) -> str:
@@ -94,11 +95,22 @@ class NapCatApp(App):
                         content = raw
                     elif isinstance(raw, list):
                         content = " ".join(m.get("text", "") for m in raw if m.get("type") == "text")
-                    if target_id in self.chats:
-                        item = self.chats[target_id]
-                        item.last_message = content
-                        item.last_sender = sender_name
-                        item.last_time = ev.get("time", 0)
+                    if not target_id:
+                        continue
+                    if target_id not in self.chats:
+                        is_group = bool(ev.get("group_id"))
+                        self.chats.setdefault(target_id, ChatItem(
+                            id=target_id,
+                            name=(sender_name or target_id) if not is_group else target_id,
+                            kind="group" if is_group else "private",
+                        ))
+                    item = self.chats[target_id]
+                    item.last_message = content
+                    item.last_sender = sender_name
+                    item.last_time = ev.get("time", 0)
+                    mid = str(ev.get("message_id", "")) or str(ev.get("message_seq", ""))
+                    if mid and mid not in self._seen_message_ids:
+                        self._seen_message_ids.add(mid)
                         item.unread += 1
                 elif post_type == "notice":
                     notice_type = ev.get("notice_type", "")

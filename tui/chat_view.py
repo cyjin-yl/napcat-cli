@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from datetime import datetime
-from subprocess import run
 from typing import TYPE_CHECKING
 
 from textual.app import ComposeResult
