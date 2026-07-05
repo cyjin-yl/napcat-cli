@@ -147,10 +147,11 @@ class EventsReader:
             if len(events) >= limit:
                 break
 
+            # Extract stem for both type and time filters
+            stem = f.stem
+
             # Filter by type
             if event_type:
-                # Extract type from filename
-                stem = f.stem
                 if event_type not in stem:
                     continue
 

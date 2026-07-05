@@ -410,7 +410,7 @@ class EventProcessor:
             try:
                 import subprocess
                 # Replace $REASON with actual reason
-                cmd = self.wake_command.replace("$REASON", reason).replace("${REASON}", reason)
+                cmd = self.wake_command.replace("$REASON", reason).replace("${REASON}", reason).replace("{reason}", reason)
                 subprocess.run(cmd, shell=True, check=True, timeout=30,
                              capture_output=True, text=True)
             except Exception as e:

@@ -361,8 +361,6 @@ cd skills-fs && make test
 ## Contributing
 
 Contributions welcome! Proudly powered by [skills-fs](https://github.com/yandu-app/skills-fs).
-
-
 ## License
 
 Same as parent project.
