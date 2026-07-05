@@ -66,6 +66,11 @@ def cmd_api(args: argparse.Namespace, api: NapCatAPI) -> int:
 
 def cmd_send(args: argparse.Namespace, api: NapCatAPI) -> int:
     """napcat send - Send a message."""
+    # Check online status before sending
+    if not api.is_online():
+        print("Error: bot is offline. Check 'napcat status' or restart NapCat.", file=sys.stderr)
+        return 1
+
     msg_type = "group" if args.target_type == "group" else "private"
     target_id = args.target_id
 
