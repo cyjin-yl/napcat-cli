@@ -76,9 +76,23 @@ def cmd_send(args: argparse.Namespace, api: NapCatAPI) -> int:
             segments.append({"type": "at", "data": {"qq": uid}})
 
     if args.file:
-        segments.append({"type": "file", "data": {"file": args.file, "name": Path(args.file).name}})
+        file_path = args.file
+        if file_path.startswith(("http://", "https://", "file:///", "base64://")):
+            pass
+        elif Path(file_path).exists():
+            file_path = "file:///" + Path(file_path).resolve()
+        else:
+            print(f"Warning: file not found '{args.file}', sending as-is (NapCat may reject)", file=sys.stderr)
+        segments.append({"type": "file", "data": {"file": file_path, "name": Path(file_path).name}})
     elif args.image:
-        segments.append({"type": "image", "data": {"file": args.image}})
+        image_path = args.image
+        if image_path.startswith(("http://", "https://", "file:///", "base64://")):
+            pass
+        elif Path(image_path).exists():
+            image_path = "file:///" + Path(image_path).resolve()
+        else:
+            print(f"Warning: image not found '{args.image}', sending as-is (NapCat may reject)", file=sys.stderr)
+        segments.append({"type": "image", "data": {"file": image_path}})
 
     # Text message
     segments.append({"type": "text", "data": {"text": args.message}})
@@ -226,11 +240,11 @@ def cmd_daemon(args: argparse.Namespace, api: NapCatAPI) -> int:
         cfg = get_config()
         cfg_path = DATA_DIR / "daemon.json"
         cfg_dict = {
-            "api_url": cfg.api_url,
-            "token": cfg.token,
-            "webhook_port": cfg.webhook_port,
-            "data_dir": str(DATA_DIR),
+            "self_id": cfg.self_id or "",
+            "wake_command": cfg.wake_command,
             "wake_on_event": cfg.wake_on_event,
+            "ws_port": cfg.ws_port,
+            "http_port": cfg.http_port,
         }
         cfg_path.write_text(json.dumps(cfg_dict, indent=2))
 
@@ -363,7 +377,10 @@ def cmd_config(args: argparse.Namespace, api: NapCatAPI) -> int:
             "self_id": cfg.self_id,
             "data_dir": str(DATA_DIR),
             "webhook_port": cfg.webhook_port,
+            "ws_port": cfg.ws_port,
+            "http_port": cfg.http_port,
             "wake_on_event": cfg.wake_on_event,
+            "wake_command": cfg.wake_command,
         }, indent=2))
         return 0
 
@@ -431,7 +448,7 @@ def main() -> int:
     send_p = subparsers.add_parser("send", help="Send a message")
     send_p.add_argument("target_type", choices=["group", "private"])
     send_p.add_argument("target_id", help="Group ID or user ID")
-    send_p.add_argument("message", help="Message text")
+    send_p.add_argument("--message", "-m", required=True, help="Message text")
     send_p.add_argument("--at", nargs="+", help="QQ numbers to @")
     send_p.add_argument("--file", help="File to send")
     send_p.add_argument("--image", help="Image to send")
