@@ -35,13 +35,13 @@ class ChatViewScreen(Screen):
         overflow: scroll;
         padding: 1;
     }
-    #input_bar {
+    #input-bar {
         dock: bottom;
         height: auto;
         border: solid $accent;
         background: $surface;
     }
-    #cmd_row, #msg_row {
+    #cmd-row, #msg-row {
         height: 1;
         width: 1fr;
     }
@@ -87,14 +87,14 @@ class ChatViewScreen(Screen):
             Horizontal(
                 Input(placeholder="napcat 命令...", id="cmd-input"),
                 Button("执行", id="cmd-btn"),
-                id="cmd_row",
+                id="cmd-row",
             ),
             Horizontal(
                 Input(placeholder="输入消息...", id="msg-input"),
                 Button("发送", id="send-btn"),
-                id="msg_row",
+                id="msg-row",
             ),
-            id="input_bar",
+            id="input-bar",
         )
 
     def on_mount(self) -> None:
@@ -276,9 +276,9 @@ class ChatViewScreen(Screen):
         self.run_worker(self._execute_command_worker(cmd))
 
     async def _execute_command_worker(self, cmd: str) -> None:
-        """Execute a napcat CLI command and show output in messages."""
-        result = run(["napcat"] + cmd.split(), capture_output=True, text=True, timeout=30)
-        output = result.stdout or result.stderr or "(no output)"
+        """Execute a napcat CLI command via API client and show output."""
+        stdout, stderr, _ = await self._app().client.run_napcat_cli(cmd.split())
+        output = stdout or stderr or "(no output)"
         rich_log = self.query_one("#messages", RichLog)
         rich_log.write(Text.from_markup(f"[bold cyan]⚡ {cmd}[/bold cyan]\n{output}"), scroll_end=True)
 
