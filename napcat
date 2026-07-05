@@ -391,25 +391,47 @@ def cmd_config(args: argparse.Namespace, api: NapCatAPI) -> int:
 
 def cmd_status(args: argparse.Namespace, api: NapCatAPI) -> int:
     """napcat status - Check bot status."""
-    result = api.call("get_login_info")
-    if result.get("retcode") == 0:
-        data = result["data"]
-        print(f"Logged in as: {data.get('nickname')} ({data.get('user_id')})", file=sys.stderr)
-        print(json.dumps(result, indent=2, ensure_ascii=False))
-        # Update config with self_id
-        cfg = get_config()
-        if cfg.self_id is None:
-            cfg.self_id = str(data.get("user_id", ""))
-            cfg.save()
-        return 0
-    else:
+    # Check login info
+    login = api.call("get_login_info")
+    if login.get("retcode") != 0:
         print("Not logged in", file=sys.stderr)
         return 1
+
+    # Check online status
+    status = api.call("get_status")
+    data = status.get("data", {})
+    online = data.get("online", False)
+    good = data.get("good", False)
+
+    nickname = login["data"].get("nickname", "Unknown")
+    user_id = login["data"].get("user_id", "Unknown")
+
+    status_text = "在线" if online else "离线"
+    health_text = "状态良好" if good else "状态异常"
+    print(f"Logged in as: {nickname} ({user_id})", file=sys.stderr)
+    print(f"Status: {status_text} ({health_text})", file=sys.stderr)
+
+    # Update config with self_id
+    cfg = get_config()
+    if cfg.self_id is None:
+        cfg.self_id = str(login["data"].get("user_id", ""))
+        cfg.save()
+
+    # Print full JSON
+    print(json.dumps({"login": login["data"], "status": data}, indent=2, ensure_ascii=False))
+    return 0
 
 
 def cmd_ocr(args: argparse.Namespace, api: NapCatAPI) -> int:
     """napcat ocr - OCR an image."""
-    result = api.call("ocr_image", image=args.image)
+    image_path = args.image
+    if not image_path.startswith(("http://", "https://", "file:///", "base64://")):
+        if Path(image_path).exists():
+            image_path = "file:///" + Path(image_path).resolve()
+        else:
+            print(f"Error: image file not found: {args.image}", file=sys.stderr)
+            return 1
+    result = api.call("ocr_image", image=image_path)
     print(json.dumps(result, indent=2, ensure_ascii=False))
     return 0 if result.get("retcode") == 0 else 1
 

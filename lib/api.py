@@ -102,6 +102,63 @@ class NapCatAPI:
                 result[k] = v
         return result
 
+    def is_online(self, _cache_ttl: int = 30) -> bool:
+        """Check if NapCat bot is currently online.
+
+        Caches result for _cache_ttl seconds to avoid excessive polling.
+        """
+        import time
+        now = time.time()
+        if hasattr(self, "_online_cache") and (now - self._online_cache["ts"]) < _cache_ttl:
+            return self._online_cache["online"]
+
+        result = self.request("get_status", method="POST", json_body={})
+        data = result.get("data", {})
+        online = bool(data.get("online", False))
+        self._online_cache = {"ts": now, "online": online}
+        return online
+
+    @staticmethod
+    def friendly_error(raw_message: str) -> str:
+        """Map NapCat kernel error messages to user-friendly descriptions."""
+        mapping: dict[str, str] = {
+            "NTEvent serviceAndMethod:NodeIKernelMsgService/sendMsgInfoListener/onMsgInfoListener": "NapCat 内核超时，bot 可能离线",
+            "ERR_NEED_MAKEUP": "QQ 风控限制，操作被拒绝",
+            "ERR_NOT_GROUP_ADMIN": "不是群管理员",
+            "ERR_NOT_IN_GROUP": "不在该群中",
+            "ERR_REQUEST_COOLDOWN": "请求冷却中，请稍后再试",
+            "ERR_SEND_MSG_FREQ_LIMIT": "发送频率限制，请稍后再试",
+            "ERR_GROUP_NOT_FOUND": "群不存在或已退群",
+        }
+        for pattern, friendly in mapping.items():
+            if pattern in raw_message:
+                return friendly
+        # If message contains kernel internal path, simplify it
+        if "NodeIKernel" in raw_message:
+            return "NapCat 内核响应超时"
+        return raw_message
+
+    # Cache of known unsupported APIs (populated on first use)
+    _unsupported_apis: set[str] | None = None
+
+    def is_api_supported(self, action: str) -> bool | None:
+        """Check if a NapCat API action is supported.
+
+        Returns True if known supported, False if known unsupported,
+        None if unknown (hasn't been tested yet).
+        """
+        if self._unsupported_apis is None:
+            self._unsupported_apis = set()
+        if action in self._unsupported_apis:
+            return False
+        return None  # unknown
+
+    def mark_api_unsupported(self, action: str) -> None:
+        """Record that an API action is not supported by this NapCat instance."""
+        if self._unsupported_apis is None:
+            self._unsupported_apis = set()
+        self._unsupported_apis.add(action)
+
 
     def call(self, action: str, **params: Any) -> dict:
         """Call an API action with parameters.
@@ -113,8 +170,33 @@ class NapCatAPI:
         Returns:
             Parsed JSON response.
         """
+        # Check if API is known unsupported
+        if self.is_api_supported(action) is False:
+            return {
+                "status": "failed",
+                "retcode": 200,
+                "data": None,
+                "message": f"此 NapCat 版本不支持 API '{action}'",
+                "wording": f"API '{action}' 不支持",
+            }
+
         normalized = self._normalize(params)
-        return self.request(action, json_body=normalized)
+        result = self.request(action, json_body=normalized)
+
+        # Detect unsupported API responses and cache them
+        if result.get("message", "") == "不支持的Api" or "不支持的Api" in str(result.get("wording", "")):
+            self.mark_api_unsupported(action)
+            result["message"] = f"不支持的Api: {action}"
+            result["wording"] = f"API '{action}' 不支持"
+
+        # Map kernel errors to friendly messages
+        raw_msg = result.get("message", "")
+        if raw_msg and result.get("retcode", 0) != 0:
+            friendly = self.friendly_error(raw_msg)
+            if friendly != raw_msg:
+                result["message"] = friendly
+
+        return result
 
     def _connection_hint(self) -> str:
         """Generate helpful hint when connection fails."""
