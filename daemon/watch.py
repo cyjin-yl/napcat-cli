@@ -429,8 +429,10 @@ class EventProcessor:
             self.log(f"Executing wake command: {self.wake_command}")
             try:
                 import subprocess
-                # Replace $REASON with actual reason
-                cmd = self.wake_command.replace("$REASON", reason).replace("${REASON}", reason).replace("{reason}", reason)
+                import shlex
+                # Replace $REASON with quoted actual reason to prevent shell injection
+                safe_reason = shlex.quote(reason)
+                cmd = self.wake_command.replace("$REASON", safe_reason).replace("${REASON}", safe_reason).replace("{reason}", safe_reason)
                 subprocess.run(cmd, shell=True, check=True, timeout=30,
                              capture_output=True, text=True)
             except Exception as e:
@@ -784,10 +786,7 @@ class NapCatHandler(BaseHTTPRequestHandler):
                 return {"error": "group_id and message are required"}
             from lib.api import NapCatAPI
             api = NapCatAPI()
-            return api.request("send_group_msg", method="POST", json_body={
-                "group_id": int(group_id) if group_id.isdigit() else group_id,
-                "message": message,
-            })
+            return api.call("send_msg", message_type="group", group_id=int(group_id) if group_id.isdigit() else group_id, message=message)
 
         if action == "send_private_message":
             user_id = str(params.get("user_id", ""))
@@ -796,21 +795,17 @@ class NapCatHandler(BaseHTTPRequestHandler):
                 return {"error": "user_id and message are required"}
             from lib.api import NapCatAPI
             api = NapCatAPI()
-            return api.request("send_private_msg", method="POST", json_body={
-                "user_id": int(user_id) if user_id.isdigit() else user_id,
-                "message": message,
-            })
+            return api.call("send_msg", message_type="private", user_id=int(user_id) if user_id.isdigit() else user_id, message=message)
 
         # Proxy NapCat API calls through napcat_ prefix
         if action.startswith("napcat_"):
             from lib.api import NapCatAPI
             api = NapCatAPI()
             napcat_action = action.replace("napcat_", "", 1)
-            result = api.request(napcat_action, method="POST", json_body=params)
-            return result
+            return api.call(napcat_action, **params)
 
-        self._send_error(404, f"Unknown action: {action}")
-        return None
+        return {"error": f"Unknown action: {action}"}
+
 
 
 def run_http_server(
@@ -835,6 +830,58 @@ def run_http_server(
 # Main
 # ---------------------------------------------------------------------------
 
+async def health_check_task(processor: EventProcessor, api_url: str, token: str, interval: int = 60, cooldown: int = 300) -> None:
+    """Periodically check if NapCat bot is online via HTTP API.
+    
+    Runs as a separate task alongside ws_daemon so a hung WS connection
+    doesn't block health checks. Uses HTTP API (not WS) to detect
+    'WS connected but bot offline' cases.
+    
+    Args:
+        processor: EventProcessor for logging and wake commands.
+        api_url: NapCat HTTP API URL.
+        token: API authentication token.
+        interval: Check interval in seconds (default: 60).
+        cooldown: Minimum seconds between wake attempts (default: 300).
+    """
+    import urllib.request
+    last_wake = 0.0
+    loop = asyncio.get_running_loop()
+    
+    while True:
+        try:
+            def probe():
+                url = f"{api_url}/get_status"
+                req = urllib.request.Request(url, method="POST")
+                req.add_header("Content-Type", "application/json")
+                if token:
+                    req.add_header("Authorization", f"Bearer {token}")
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    return json.loads(resp.read())
+            
+            data = await loop.run_in_executor(None, probe)
+            online = bool(data.get("data", {}).get("online", False))
+            
+            if not online:
+                now = time.time()
+                if now - last_wake > cooldown:
+                    processor.log(f"Health check: bot is offline. Attempting wake...")
+                    try:
+                        processor._wake("HEALTH_CHECK_OFFLINE")
+                        last_wake = now
+                        processor.log("Wake command sent.")
+                    except Exception as e:
+                        processor.log(f"Wake command failed: {e}")
+                else:
+                    processor.log(f"Health check: bot is offline (cooldown: {int(cooldown - (now - last_wake))}s remaining)")
+            else:
+                processor.log("Health check: bot is online.")
+        except Exception as e:
+            processor.log(f"Health check failed: {e}")
+        
+        await asyncio.sleep(interval)
+
+
 def run_daemon(config_path: str) -> None:
     """Start the WebSocket daemon with HTTP provider."""
     cfg_data = json.loads(Path(config_path).read_text())
@@ -858,6 +905,10 @@ def run_daemon(config_path: str) -> None:
     ws_port = int(cfg_data.get("ws_port", os.environ.get("NAPCAT_WS_PORT", "18800")))
     ws_url = cfg_data.get("ws_url", f"ws://127.0.0.1:{ws_port}")
 
+    # API URL for health checks (HTTP, not WS)
+    api_url = cfg_data.get("api_url", os.environ.get("NAPCAT_API_URL", "http://127.0.0.1:18801"))
+    token = cfg_data.get("token", os.environ.get("NAPCAT_TOKEN", ""))
+
     # Start HTTP provider
     server = run_http_server(processor, cache, http_port)
 
@@ -877,7 +928,15 @@ def run_daemon(config_path: str) -> None:
     processor.log(f"WebSocket URL: {ws_url}")
     processor.log(f"HTTP provider port: {http_port}")
 
-    loop.run_until_complete(ws_daemon(ws_url, processor, cache))
+    # Run WS daemon and health check as parallel tasks
+    ws_task = loop.create_task(ws_daemon(ws_url, processor, cache))
+    hc_task = loop.create_task(health_check_task(processor, api_url, token))
+
+    # Wait for either to finish (shutdown or WS crash)
+    done, _ = loop.run_until_complete(asyncio.wait([ws_task, hc_task], return_when=asyncio.FIRST_COMPLETED))
+    for t in done:
+        if t.exception():
+            processor.log(f"Task exception: {t.exception()}")
 
 
 def main() -> None:

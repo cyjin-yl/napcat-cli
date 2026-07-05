@@ -146,13 +146,14 @@ class ChatViewScreen(Screen):
                 self._loaded_message_ids.add(mid)
 
         # Batch write all messages at once for performance
-        parts = []
-        for m in sorted_msgs:
-            line = self._format_message_line(m, self_id)
-            parts.append(line)
-
-        if parts:
-            rich_log.write(Text.from_markup("\n".join(parts)), scroll_end=True)
+        combined = Text()
+        for i, m in enumerate(sorted_msgs):
+            msg_text = self._format_message_line(m, self_id)
+            combined.append_text(msg_text)
+            if i < len(sorted_msgs) - 1:
+                combined.append("\n", style="dim")
+        if sorted_msgs:
+            rich_log.write(combined, scroll_end=True)
 
         if sorted_msgs:
             self._last_message_time = max(m.get("time", 0) for m in sorted_msgs)
@@ -179,7 +180,7 @@ class ChatViewScreen(Screen):
         now_str = datetime.fromtimestamp(ts).strftime("%H:%M")
 
         rich_log = self.query_one("#messages", RichLog)
-        rich_log.write(Text.from_markup(f"[green]我[/green] {now_str}\n{text}"), scroll_end=True)
+        rich_log.write(Text.assemble(("[我] ", "green"), (f"{now_str}\n", ""), (text, "")), scroll_end=True)
 
         self._last_message_time = ts
 
@@ -198,7 +199,7 @@ class ChatViewScreen(Screen):
         msgs = await client.get_message_history(self.chat_type, self.chat_id, count=100)
 
         rich_log = self.query_one("#messages", RichLog)
-        at_end = rich_log.at_bottom
+        at_end = rich_log.scroll_y >= rich_log.max_scroll_y
 
         # Filter: newer than last load AND not already loaded by ID
         new_msgs = [
@@ -226,13 +227,14 @@ class ChatViewScreen(Screen):
             self_id = ""
 
         # Batch write all new messages at once
-        parts = []
-        for m in new_msgs:
-            line = self._format_message_line(m, self_id)
-            parts.append(line)
-
-        if parts:
-            rich_log.write(Text.from_markup("\n".join(parts)))
+        combined = Text()
+        for i, m in enumerate(new_msgs):
+            msg_text = self._format_message_line(m, self_id)
+            combined.append_text(msg_text)
+            if i < len(new_msgs) - 1:
+                combined.append("\n", style="dim")
+        if new_msgs:
+            rich_log.write(combined)
             if at_end:
                 rich_log.scroll_end()
 
@@ -240,8 +242,8 @@ class ChatViewScreen(Screen):
         """Extract a stable message ID for deduplication."""
         return str(m.get("message_id", "")) or str(m.get("message_seq", ""))
 
-    def _format_message_line(self, m: dict, self_id: str) -> str:
-        """Format a single message into a Rich markup line."""
+    def _format_message_line(self, m: dict, self_id: str) -> Text:
+        """Format a message as a Text object with styled prefix and plain content."""
         sender = m.get("sender", {})
         sender_name = ""
         sender_uid = ""
@@ -256,15 +258,24 @@ class ChatViewScreen(Screen):
 
         raw = m.get("message", [])
         if isinstance(raw, list):
-            content = " ".join(seg.get("text", "") for seg in raw if seg.get("type") == "text")
+            content = " ".join(seg.get("data", {}).get("text", "") for seg in raw if seg.get("type") == "text")
         elif isinstance(raw, str):
             content = raw
+        else:
+            content = ""
         if not content:
             content = "[media]"
 
         is_self = sender_uid == self_id
-        prefix = "[green]我[/green]" if is_self else f"[blue]{sender_name}[/blue]"
-        return f"{prefix} {time_str}\n{content}"
+        prefix_name = "我" if is_self else sender_name
+        prefix_style = "green" if is_self else "blue"
+
+        return Text.assemble(
+            (f"[{prefix_name}] ", prefix_style),
+            (time_str, ""),
+            ("\n", ""),
+            (content, ""),
+        )
 
     def _execute_command(self) -> None:
         input_widget = self.query_one("#cmd-input", Input)
@@ -279,7 +290,7 @@ class ChatViewScreen(Screen):
         stdout, stderr, _ = await self._app().client.run_napcat_cli(cmd.split())
         output = stdout or stderr or "(no output)"
         rich_log = self.query_one("#messages", RichLog)
-        rich_log.write(Text.from_markup(f"[bold cyan]⚡ {cmd}[/bold cyan]\n{output}"), scroll_end=True)
+        rich_log.write(Text.assemble((f"⚡ {cmd}\n", "bold cyan"), (output, "")), scroll_end=True)
 
     def action_scroll_down(self) -> None:
         self.query_one("#messages", RichLog).scroll_down()

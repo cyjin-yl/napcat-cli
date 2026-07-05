@@ -170,7 +170,7 @@ class SlashCommandModal(ModalScreen[str | None]):
 
     async def _execute_command_worker(self, cmd: str) -> None:
         output = self.query_one("#slash-output", RichLog)
-        output.write(f"$ {cmd}\n")
+        output.write(Text.assemble((f"$ {cmd}", None), ("\n", "")), markup=False)
 
         parts = cmd.split()
         self._completions = []
@@ -179,10 +179,10 @@ class SlashCommandModal(ModalScreen[str | None]):
         stdout, stderr, code = await self._app().client.run_napcat_cli(parts)
 
         if stdout:
-            output.write(stdout)
+            output.write(Text(stdout), markup=False)
         if stderr:
-            output.write(Text.from_markup(f"[red]{stderr}[/]"))
-        output.write(Text.from_markup(f"\n[bold]exit: {code}[/]\n"), scroll_end=True)
+            output.write(Text(stderr, style="red"), markup=False)
+        output.write(Text.assemble(("\n", ""), (f"exit: {code}\n", "bold")), scroll_end=True)
 
         self.query_one("#slash-input", Input).value = ""
 

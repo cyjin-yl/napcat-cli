@@ -94,7 +94,7 @@ class NapCatApp(App):
                     if isinstance(raw, str):
                         content = raw
                     elif isinstance(raw, list):
-                        content = " ".join(m.get("text", "") for m in raw if m.get("type") == "text")
+                        content = " ".join(m.get("data", {}).get("text", "") for m in raw if m.get("type") == "text")
                     if not target_id:
                         continue
                     if target_id not in self.chats:

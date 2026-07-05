@@ -33,12 +33,11 @@ class NapCatConfig:
     private_trigger: str = "*"
 
     def save(self) -> None:
-        """Save config to file."""
-        # 🔴 问题：配置文件写入没有原子性保护
-        # 问题1：直接写入可能导致配置文件在写入过程中被读取，得到不完整的配置
-        # 问题2：多进程同时保存配置会导致数据丢失
-        # 必须改进：使用原子性写入（写入临时文件后重命名）或文件锁
-        CONFIG_FILE.write_text(json.dumps(asdict(self), indent=2, ensure_ascii=False))  # ❌ 问题：非原子操作
+        """Save config to file atomically via temp file then rename."""
+        import os
+        tmp_path = CONFIG_FILE.with_suffix(".tmp")
+        tmp_path.write_text(json.dumps(asdict(self), indent=2, ensure_ascii=False))
+        os.replace(str(tmp_path), str(CONFIG_FILE))
 
     def set(self, key: str, value: str) -> None:
         """Set a config value by key name."""
@@ -47,11 +46,11 @@ class NapCatConfig:
             attr = getattr(self, key)
             if isinstance(attr, int):
                 value = int(value)
-            elif isinstance(attr, bool):
+            elif isinstance(attr, bool) and isinstance(value, str):
                 value = value.lower() in ("true", "1", "yes")
             setattr(self, key, value)
         else:
-            raise ValueError(f"Unknown config key: {key}. Available: {', '.join(f.name for f in fields(self))}")
+            raise ValueError(f"Unknown config key: {key}. Available: {', '.join(f.name for f in fields(NapCatConfig))}")
 
 
 def get_config() -> NapCatConfig:

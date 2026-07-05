@@ -309,21 +309,20 @@ The daemon generates alert files for important events:
 
 ### Wake Command
 
-When `wake_on_event` is `true` in config, the daemon executes `wake_command` for important events (friend requests, group invites, @mentions). The command string supports one variable:
-
-- `$REASON` / `${REASON}` / `{reason}` — replaced with the event reason (e.g. "New friend request from 123456789")
+When `wake_on_event` is `true` in config, the daemon executes `wake_command` for important events (friend requests, @mentions, bans, kicks, etc.). The command string supports one variable:
+- `$REASON` / `${REASON}` / `{reason}` — replaced with the event reason code. Possible values: `AT_ME`, `REPLY_TO_ME`, `GROUP_TRIGGER`, `PRIVATE_TRIGGER`, `NEW_POKE`, `PROFILE_LIKE`, `GROUP_ADMIN_CHANGE`, `BOT_BANNED`, `BOT_KICKED_FROM_GROUP`, `GROUP_DISBANDED`, `NEW_GROUP_MEMBER`, `MY_MESSAGE_RECALLED`, `NEW_FRIEND`, `NEW_REQUEST`, `BOT_OFFLINE`
 
 **Examples for different agents:**
 
 ```bash
 # Hermes
-napcat config set wake_command "hermes send --to weixin ' QQ事件: \$REASON'"
-napcat config set wake_command "hermes send --to weixin 'QQ事件: \$REASON'"
+napcat config set wake_command "hermes send --to weixin 'QQ事件: \$REASON，请检查 ~/.napcat-data/alerts/ 并考虑回复'"
+
 # Claude Code (notify via file watch or custom script)
-napcat config set wake_command 'echo "\$REASON" >> ~/.napcat-data/.agent-wake'
+napcat config set wake_command "echo 'QQ事件: \$REASON，请检查 ~/.napcat-data/alerts/ 并考虑回复' >> ~/.napcat-data/.agent-wake"
 
 # Generic shell script
-napcat config set wake_command '/path/to/notify.sh "\$REASON"'
+napcat config set wake_command "/path/to/notify.sh 'QQ事件: \$REASON，请检查 ~/.napcat-data/alerts/ 并考虑回复'"
 ```
 
 **Security**: `wake_command` runs verbatim via `shell=True` with the user's privileges. Do not paste untrusted templates.

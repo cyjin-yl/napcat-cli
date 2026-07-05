@@ -80,6 +80,8 @@ class EventsReader:
         since: int | None = None,
         post_type: str | None = None,
         group_id: int | None = None,
+        user_id: int | None = None,
+        keyword: str | None = None,
     ) -> list[dict[str, Any]]:
         """Read events from SQLite, newest first.
 
@@ -89,6 +91,8 @@ class EventsReader:
             since: Only include events with timestamp >= since.
             post_type: Filter by post_type (e.g., "message", "notice").
             group_id: Filter by group_id.
+            user_id: Filter by user_id or sender_id.
+            keyword: Filter by keyword in raw_json (LIKE query).
         """
         conn = self._get_conn()
         return read_events(
@@ -98,6 +102,8 @@ class EventsReader:
             since=since,
             post_type=post_type,
             group_id=group_id,
+            user_id=user_id,
+            keyword=keyword,
         )
 
     def read_alerts(

@@ -97,7 +97,7 @@ class ChatListScreen(Screen):
             if sig not in app._seen_alerts:
                 app._seen_alerts.add(sig)
                 summary = alert.get("summary", alert.get("message", "Unknown"))
-                self.app.notify(f"\u26a0 {summary}", severity="warning")
+                self.app.notify(f"\u26a0 {summary}", severity="warning", markup=False)
 
         listview = self.query_one("#chat-listview", ListView)
 
@@ -130,7 +130,7 @@ class ChatListScreen(Screen):
             qq = chat.id
             name = f"{qq} [{remark}]" if remark else f"{qq}"
         badge = f" [{chat.unread}]" if chat.unread > 0 else ""
-        name_label = Label(f"{name}{badge}")
+        name_label = Label(f"{name}{badge}", markup=False)
         # Second line: time + sender + last message
         parts: list[str] = []
         if chat.last_time:
@@ -142,7 +142,7 @@ class ChatListScreen(Screen):
         msg = (chat.last_message or "")[:40]
         if msg:
             parts.append(msg)
-        msg_label = Label(" ".join(parts))
+        msg_label = Label(" ".join(parts), markup=False)
         return name_label, msg_label
 
     def _app(self) -> "NapCatApp":

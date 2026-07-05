@@ -148,6 +148,8 @@ def read_events(
     since: int | None = None,
     post_type: str | None = None,
     group_id: int | None = None,
+    user_id: int | None = None,
+    keyword: str | None = None,
 ) -> list[dict[str, Any]]:
     """Read events from the database, newest first."""
     query = "SELECT raw_json FROM events WHERE 1=1"
@@ -165,6 +167,13 @@ def read_events(
     if group_id:
         query += " AND group_id = ?"
         params.append(group_id)
+    if user_id:
+        query += " AND (user_id = ? OR sender_id = ?)"
+        params.append(user_id)
+        params.append(user_id)
+    if keyword:
+        query += " AND raw_json LIKE ?"
+        params.append(f"%{keyword}%")
 
     query += " ORDER BY timestamp DESC LIMIT ?"
     params.append(limit)

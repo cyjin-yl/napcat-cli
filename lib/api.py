@@ -22,6 +22,36 @@ class NapCatAPI:
         self.timeout = timeout if timeout is not None else 30
         self.echo_counter = 0
 
+        # Load or create API availability cache
+        self._load_api_cache()
+
+    def _load_api_cache(self) -> None:
+        """Load API availability cache from disk. No probe — cache is built lazily."""
+        self._unsupported_apis: set[str] = set()
+        cache_file = DATA_DIR / "napcat_api_cache.json"
+        try:
+            if cache_file.exists():
+                data = json.loads(cache_file.read_text())
+                ts = data.get("timestamp", 0)
+                import time
+                if time.time() - ts < 3600:  # 1 hour TTL
+                    self._unsupported_apis = set(data.get("unsupported", []))
+        except Exception:
+            pass
+
+    def _save_api_cache(self) -> None:
+        """Persist API availability cache to disk."""
+        try:
+            import time
+            cache_file = DATA_DIR / "napcat_api_cache.json"
+            cache_file.parent.mkdir(parents=True, exist_ok=True)
+            cache_file.write_text(json.dumps({
+                "timestamp": int(time.time()),
+                "unsupported": list(self._unsupported_apis),
+            }))
+        except Exception:
+            pass
+
     def _next_echo(self) -> str:
         """Generate unique echo ID for request tracking."""
         import secrets
@@ -161,6 +191,7 @@ class NapCatAPI:
         if self._unsupported_apis is None:
             self._unsupported_apis = set()
         self._unsupported_apis.add(action)
+        self._save_api_cache()
 
 
     def call(self, action: str, timeout: int | None = None, **params: Any) -> dict:
@@ -179,8 +210,8 @@ class NapCatAPI:
                 "status": "failed",
                 "retcode": 200,
                 "data": None,
-                "message": f"此 NapCat 版本不支持 API '{action}'",
-                "wording": f"API '{action}' 不支持",
+                "message": f"API '{action}' is not supported by this NapCat instance. Check OneBot 11 spec or NapCat extensions.",
+                "wording": f"API '{action}' unsupported",
             }
 
         normalized = self._normalize(params)
@@ -189,9 +220,8 @@ class NapCatAPI:
         # Detect unsupported API responses and cache them
         if result.get("message", "") == "不支持的Api" or "不支持的Api" in str(result.get("wording", "")):
             self.mark_api_unsupported(action)
-            result["message"] = f"不支持的Api: {action}"
-            result["wording"] = f"API '{action}' 不支持"
-
+            result["message"] = f"API '{action}' is not supported by this NapCat instance. Check OneBot 11 spec or NapCat extensions."
+            result["wording"] = f"API '{action}' unsupported"
         # Map kernel errors to friendly messages
         raw_msg = result.get("message", "")
         if raw_msg and result.get("retcode", 0) != 0:

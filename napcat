@@ -179,12 +179,18 @@ def cmd_group(args: argparse.Namespace, api: NapCatAPI) -> int:
         result = api.call("set_group_remark", group_id=args.group_id, remark=args.remark)
     elif sub == "announce":
         result = api.call("send_group_notice", group_id=args.group_id, content=args.content)
+        if result.get("retcode") == 200 and result.get("data") is None:
+            print("Group announcements are not supported by this NapCat instance.", file=sys.stderr)
     elif sub == "list":
         result = api.call("get_group_list")
     elif sub == "essence":
         result = api.call("get_essence_list", group_id=args.group_id)
+        if result.get("retcode") == 200 and result.get("data") is None:
+            print("Essence messages are not supported by this NapCat instance.", file=sys.stderr)
     elif sub == "poke":
         result = api.call("send_poke", group_id=args.group_id, user_id=args.user_id)
+        if result.get("retcode") == 200 and result.get("data") is None:
+            print("Group poke is not supported by this NapCat instance.", file=sys.stderr)
     else:
         print(f"Unknown group command: {sub}", file=sys.stderr)
         return 1
@@ -378,6 +384,49 @@ def cmd_alerts(args: argparse.Namespace, api: NapCatAPI) -> int:
         print(f"  [{name}] {summary[:80]}", file=sys.stderr)
 
     return 0 if alerts else 1
+def cmd_batch(args: argparse.Namespace, api: NapCatAPI) -> int:
+    """napcat batch - Batch operations (kick, mute, unmute)."""
+    if not require_online(api):
+        return 1
+
+    batch_cmd = getattr(args, "batch_command", None)
+    group_id = str(args.group_id)
+    user_ids = [str(uid) for uid in args.user_ids]
+    results = []
+
+    if batch_cmd == "kick":
+        reject = getattr(args, "reject", False)
+        for uid in user_ids:
+            kwargs = {"group_id": group_id, "user_id": uid}
+            if reject:
+                kwargs["reject_add_request"] = True
+            result = api.call("set_group_kick", **kwargs)
+            results.append({"user_id": uid, "action": "kick", "result": result})
+
+    elif batch_cmd == "mute":
+        duration = getattr(args, "duration", 1800)
+        for uid in user_ids:
+            result = api.call("set_group_ban", group_id=group_id, user_id=uid, duration=duration)
+            results.append({"user_id": uid, "action": "mute", "result": result})
+
+    elif batch_cmd == "unmute":
+        for uid in user_ids:
+            result = api.call("set_group_ban", group_id=group_id, user_id=uid, duration=0)
+            results.append({"user_id": uid, "action": "unmute", "result": result})
+
+    else:
+        print("Unknown batch command. Use: kick, mute, unmute", file=sys.stderr)
+        return 1
+
+    # Summary
+    success = sum(1 for r in results if r["result"].get("retcode") == 0 or r["result"].get("status") == "ok")
+    failed = len(results) - success
+    print(f"Batch {batch_cmd}: {success}/{len(results)} succeeded", file=sys.stderr)
+    if failed:
+        print(f"  Failed: {failed} operations", file=sys.stderr)
+
+    print(json.dumps(results, indent=2, ensure_ascii=False))
+    return 0 if failed == 0 else 1
 
 
 def cmd_config(args: argparse.Namespace, api: NapCatAPI) -> int:
@@ -449,6 +498,10 @@ def cmd_status(args: argparse.Namespace, api: NapCatAPI) -> int:
 
     # Print full JSON
     print(json.dumps({"login": login["data"], "status": data}, indent=2, ensure_ascii=False))
+
+    if not online:
+        print("Bot is offline. Try 'napcat daemon start' to restart, or check WebUI at http://127.0.0.1:6099/webui", file=sys.stderr)
+        return 1
     return 0
 
 
@@ -473,13 +526,98 @@ def cmd_translate(args: argparse.Namespace, api: NapCatAPI) -> int:
     if not require_online(api):
         return 1
     result = api.call("qq_translate", text=args.text, from_lang=args.from_lang, to_lang=args.to_lang)
-    if result.get("message") and "不支持" in result.get("message", ""):
-        print("Translation API not available in this NapCat version.", file=sys.stderr)
+    if result.get("retcode") != 0:
+        print(f"Translation failed: {result.get('message', result)}", file=sys.stderr)
         return 1
     print(json.dumps(result, indent=2, ensure_ascii=False))
-    return 0 if result.get("retcode") == 0 else 1
+    return 0
 
 
+def cmd_like(args: argparse.Namespace, api: NapCatAPI) -> int:
+    """napcat like - Send profile like (thumbs up)."""
+    if not require_online(api):
+        return 1
+    times = max(1, min(10, args.times or 1))
+    result = api.call("send_like", user_id=args.user_id, times=times)
+    if result.get("retcode") == 0:
+        print(f"Liked user {args.user_id} ({times} time(s))", file=sys.stderr)
+        return 0
+    else:
+        print(f"Error: {result.get('message', result)}", file=sys.stderr)
+        return 1
+
+
+def cmd_react(args: argparse.Namespace, api: NapCatAPI) -> int:
+    """napcat react - Send emoji reaction on a group message."""
+    if not require_online(api):
+        return 1
+    result = api.call("set_msg_emoji_like", message_id=args.message_id, emoji_id=args.emoji_id)
+    if result.get("retcode") == 0:
+        print(f"Emoji reaction sent (emoji_id={args.emoji_id})", file=sys.stderr)
+        return 0
+    else:
+        print(f"Error: {result.get('message', result)}", file=sys.stderr)
+        return 1
+
+def cmd_search(args: argparse.Namespace, api: NapCatAPI) -> int:
+    """napcat search - Search messages by keyword in event history."""
+    reader = EventsReader(DATA_DIR)
+    events = reader.read(
+        limit=args.limit,
+        since=args.since,
+        event_type=args.event_type,
+        keyword=args.keyword,
+    )
+    results = []
+    for e in events:
+        text = ""
+        msg = e.get("message", "")
+        if isinstance(msg, list):
+            for seg in msg:
+                if seg.get("type") == "text":
+                    text += seg.get("data", {}).get("text", "")
+        elif isinstance(msg, str):
+            text = msg
+        if args.keyword.lower() in text.lower():
+            results.append(e)
+    print(json.dumps(results, indent=2, ensure_ascii=False))
+    print(f"Found {len(results)} matching messages", file=sys.stderr)
+    return 0
+
+
+def cmd_msg(args: argparse.Namespace, api: NapCatAPI) -> int:
+    """napcat msg - Browse recent messages from a group or private chat."""
+    reader = EventsReader(DATA_DIR)
+    group_id: int | None = int(args.group_id) if args.group_id else None
+    user_id: int | None = int(args.user_id) if args.user_id else None
+    events = reader.read(
+        limit=args.limit,
+        since=args.since,
+        event_type="message",
+        group_id=group_id,
+        user_id=user_id,
+    )
+    results = []
+    for e in events:
+        sender = e.get("sender", {})
+        text = ""
+        msg = e.get("message", "")
+        if isinstance(msg, list):
+            for seg in msg:
+                if seg.get("type") == "text":
+                    text += seg.get("data", {}).get("text", "")
+        elif isinstance(msg, str):
+            text = msg
+        results.append({
+            "time": e.get("time"),
+            "sender": f"{sender.get('nickname', '?')} ({sender.get('user_id', '?')})",
+            "group_id": e.get("group_id", ""),
+            "message_type": e.get("message_type", ""),
+            "message_id": e.get("message_id", ""),
+            "text": text[:200],
+        })
+    print(json.dumps(results, indent=2, ensure_ascii=False))
+    return 0
 
 def cmd_phone(args: argparse.Namespace, api: NapCatAPI) -> int:
     """napcat phone — Launch mobile-style TUI interface."""
@@ -655,7 +793,7 @@ def main() -> int:
     daemon_p.add_argument("subcommand", choices=["start", "stop", "status"])
 
     # --- events ---
-    events_p = subparsers.add_parser("events", help="Read events from filesystem")
+    events_p = subparsers.add_parser("events", help="Read events from SQLite database")
     events_p.add_argument("--type", default=None, help="Filter by event type")
     events_p.add_argument("--since", type=int, default=None, help="Events after timestamp")
     events_p.add_argument("--limit", "-n", type=int, default=50, help="Max events to read")
@@ -689,7 +827,51 @@ def main() -> int:
     trans_p.add_argument("--to", dest="to_lang", default="zh")
 
 
+    # --- like ---
+    like_p = subparsers.add_parser("like", help="Send profile like")
+    like_p.add_argument("user_id", help="User QQ number to like")
+    like_p.add_argument("--times", "-t", type=int, default=1, help="Like times (1-10, default: 1)")
+
+    # --- react ---
+    react_p = subparsers.add_parser("react", help="Send emoji reaction on group message")
+    react_p.add_argument("message_id", help="Message ID to react to")
+    react_p.add_argument("emoji_id", help="Emoji ID (e.g. 166, 386)")
+
+    # --- search ---
+    search_p = subparsers.add_parser("search", help="Search messages by keyword in event history")
+    search_p.add_argument("--keyword", "-k", required=True, help="Keyword to search for")
+    search_p.add_argument("--limit", "-n", type=int, default=50, help="Max events to scan (default: 50)")
+    search_p.add_argument("--since", type=int, default=None, help="Events after timestamp")
+    search_p.add_argument("--event-type", "-t", default=None, help="Filter by event type")
+
+    # --- msg ---
+    msg_p = subparsers.add_parser("msg", help="Browse recent messages from a group or private chat")
+    msg_p.add_argument("--group", "-g", dest="group_id", default=None, help="Filter by group ID")
+    msg_p.add_argument("--user", "-u", dest="user_id", default=None, help="Filter by user ID")
+    msg_p.add_argument("--limit", "-n", type=int, default=50, help="Max messages to show (default: 50)")
+    msg_p.add_argument("--since", type=int, default=None, help="Messages after timestamp")
     # --- phone ---
+    # --- batch ---
+    batch_p = subparsers.add_parser("batch", help="Batch operations (kick, mute, unmute)")
+    batch_sub = batch_p.add_subparsers(dest="batch_command")
+
+    # batch kick
+    batch_kick = batch_sub.add_parser("kick", help="Kick multiple members from a group")
+    batch_kick.add_argument("group_id", help="Group ID")
+    batch_kick.add_argument("user_ids", nargs="+", help="User IDs to kick")
+    batch_kick.add_argument("--reject", action="store_true", default=False, help="Prevent rejoin")
+
+    # batch mute
+    batch_mute = batch_sub.add_parser("mute", help="Mute multiple members in a group")
+    batch_mute.add_argument("group_id", help="Group ID")
+    batch_mute.add_argument("user_ids", nargs="+", help="User IDs to mute")
+    batch_mute.add_argument("--duration", "-d", type=int, default=1800, help="Duration in seconds (default: 1800)")
+
+    # batch unmute
+    batch_unmute = batch_sub.add_parser("unmute", help="Unmute multiple members in a group")
+    batch_unmute.add_argument("group_id", help="Group ID")
+    batch_unmute.add_argument("user_ids", nargs="+", help="User IDs to unmute")
+
     phone_p = subparsers.add_parser("phone", help="Launch mobile-style TUI interface")
     phone_p.add_argument("--port", type=int, default=None, help="Daemon HTTP port (default: NAPCAT_HTTP_PORT or 18821)")
     phone_p.add_argument("--non-interactive", action="store_true", help="Run once and exit (status check)")
@@ -726,6 +908,11 @@ def main() -> int:
         "ocr": cmd_ocr,
         "translate": cmd_translate,
         "phone": cmd_phone,
+        "like": cmd_like,
+        "react": cmd_react,
+        "search": cmd_search,
+        "msg": cmd_msg,
+        "batch": cmd_batch,
     }
 
     handler = commands.get(args.command)
