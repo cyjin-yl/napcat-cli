@@ -38,6 +38,8 @@ sys.path.insert(0, str(ROOT))
 from lib.config import DATA_DIR, get_config
 from lib.events import EventsWriter, EventsReader
 
+from daemon.schemas import ACTION_SCHEMAS
+
 
 # ---------------------------------------------------------------------------
 # Event Processor (alert generation)
@@ -529,6 +531,262 @@ async def ws_daemon(ws_url: str, processor: EventProcessor, cache: EventCache) -
 
 
 # ---------------------------------------------------------------------------
+# Skills-fs FUSE Manager — spawn, monitor, restart on crash
+# ---------------------------------------------------------------------------
+
+_DEFAULT_MOUNTPOINT = str(Path.home() / ".napcat-data" / "skills")
+_DEFAULT_SKILLSFS_CONFIG = str(Path.home() / ".napcat-data" / "skills-fs.json")
+_SHIPPED_BINARY = str(Path(__file__).resolve().parent.parent / "skills-fs" / "skills-fs")
+
+
+class SkillsFsManager:
+    """Spawn skills-fs FUSE daemon and monitor its health.
+
+    Lifecycle:
+    1. After HTTP provider starts, spawn skills-fs with --daemon --pidfile.
+    2. Read PID from pidfile and monitor with os.kill(pid, 0).
+    3. If process dies, write degraded status file, restart with backoff.
+    4. On shutdown, kill the child and unmount.
+    """
+
+    def __init__(
+        self,
+        processor: EventProcessor,
+        mountpoint: str = _DEFAULT_MOUNTPOINT,
+        binary: str = "",
+        config: str = _DEFAULT_SKILLSFS_CONFIG,
+        pidfile: str = "",
+    ):
+        self.processor = processor
+        self.mountpoint = mountpoint
+        self.pidfile = pidfile or (DATA_DIR / "skills-fs.pid").as_posix()
+        self.config = config
+
+        # Resolve binary: config > shipped > PATH
+        self.binary = binary
+        if not self.binary:
+            # Try shipped binary next to this repo
+            shipped = Path(_SHIPPED_BINARY)
+            if shipped.exists() and shipped.is_file():
+                self.binary = str(shipped)
+            else:
+                # Search PATH
+                import shutil
+                found = shutil.which("skills-fs")
+                if found:
+                    self.binary = found
+        self._pid: int | None = None
+        self._status: str = "stopped"  # healthy | degraded | stopped
+        self._max_restarts = 3
+        self._restart_count = 0
+        self._stale_cleaned = False
+
+    @property
+    def status(self) -> str:
+        return self._status
+
+    def start(self) -> bool:
+        """Spawn skills-fs FUSE daemon. Returns True if mount succeeded."""
+        if not self.binary:
+            self.processor.log("skills-fs: no binary found, skipping mount")
+            self._status = "degraded"
+            self._write_degraded("skills-fs binary not found")
+            return False
+
+        # Clean stale mount before starting
+        if not self._stale_cleaned:
+            self._clean_stale_mount()
+            self._stale_cleaned = True
+
+        args = [
+            self.binary, "fuse",
+            "--config", self.config,
+            "--mountpoint", self.mountpoint,
+            "--allow-other",
+            "--pidfile", self.pidfile,
+            "--log-file", str(DATA_DIR / "skills-fs.log"),
+            "--log-level", "info",
+            "--daemon",
+        ]
+        try:
+            self.processor.log(f"skills-fs: spawning {args}")
+            import subprocess
+            subprocess.run(args, check=True, timeout=10)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as e:
+            self.processor.log(f"skills-fs: spawn failed: {e}")
+            self._status = "degraded"
+            self._write_degraded(f"spawn failed: {e}")
+            return False
+
+        # Read PID from pidfile (daemon mode writes it)
+        self._wait_for_pid(max_wait=5)
+        if self._pid is None:
+            self.processor.log("skills-fs: pidfile not written in time")
+            self._status = "degraded"
+            self._write_degraded("pid not available")
+            return False
+
+        # Verify mount is accessible
+        if not self._verify_mount():
+            self._status = "degraded"
+            self._write_degraded("mount verification failed")
+            return False
+
+        self._status = "healthy"
+        self._restart_count = 0
+        self.processor.log(f"skills-fs: mounted at {self.mountpoint} (PID {self._pid})")
+        return True
+
+    def check(self) -> bool:
+        """Check if the FUSE process is still alive. Returns True if healthy."""
+        if self._pid is None:
+            self._status = "stopped"
+            return False
+
+        try:
+            os.kill(self._pid, 0)
+        except OSError:
+            # Process is dead
+            self._status = "degraded"
+            self._write_degraded(f"skills-fs process {self._pid} died")
+            self._pid = None
+            self._stale_cleaned = False  # allow re-clean on restart
+            return False
+
+        # Also verify the mount is still accessible
+        if not self._verify_mount():
+            self._status = "degraded"
+            self._write_degraded("mount no longer accessible")
+            return False
+
+        self._status = "healthy"
+        return True
+
+    def restart(self) -> bool:
+        """Try to restart skills-fs after a crash."""
+        self._restart_count += 1
+        if self._restart_count > self._max_restarts:
+            self._status = "degraded"
+            self._write_degraded(
+                f"skills-fs crashed {self._restart_count} times, giving up"
+            )
+            self.processor.log(
+                f"skills-fs: exceeded max restarts ({self._max_restarts}), degraded"
+            )
+            return False
+
+        # Exponential backoff before restart
+        delay = min(2 ** self._restart_count, 30)
+        self.processor.log(f"skills-fs: restarting in {delay}s (attempt {self._restart_count})")
+        import time as _time
+        _time.sleep(delay)
+
+        return self.start()
+
+    def stop(self) -> None:
+        """Kill the child process and unmount."""
+        if self._pid is not None:
+            try:
+                os.kill(self._pid, signal.SIGTERM)
+                self.processor.log(f"skills-fs: sent SIGTERM to PID {self._pid}")
+            except OSError:
+                pass
+        # Lazy unmount to release any blocked readers
+        self._unmount()
+        # Clean up pidfile
+        try:
+            Path(self.pidfile).unlink(missing_ok=True)
+        except Exception:
+            pass
+        self._pid = None
+        self._status = "stopped"
+
+    # --- internal helpers ---
+
+    def _wait_for_pid(self, max_wait: int = 5) -> None:
+        """Wait for the pidfile to appear and read the PID."""
+        for _ in range(max_wait * 10):
+            try:
+                data = Path(self.pidfile).read_text().strip()
+                self._pid = int(data)
+                return
+            except (FileNotFoundError, ValueError):
+                import time as _time
+                _time.sleep(0.1)
+
+    def _verify_mount(self) -> bool:
+        """Check that the mountpoint is accessible (read a known file)."""
+        try:
+            status_file = Path(self.mountpoint) / "status"
+            if status_file.exists():
+                status_file.read_text()
+                return True
+            # Fallback: just try to stat the mountpoint itself
+            os.stat(self.mountpoint)
+            # Check it's actually a FUSE mount (not just a dir)
+            import subprocess
+            result = subprocess.run(
+                ["mount"], capture_output=True, text=True, timeout=5
+            )
+            return self.mountpoint in result.stdout
+        except Exception:
+            return False
+
+    def _clean_stale_mount(self) -> None:
+        """Lazy-unmount any stale FUSE mount at our mountpoint."""
+        try:
+            import subprocess
+            result = subprocess.run(
+                ["umount", "-l", self.mountpoint],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode == 0:
+                self.processor.log(f"skills-fs: cleaned stale mount at {self.mountpoint}")
+        except Exception as e:
+            self.processor.log(f"skills-fs: stale mount cleanup error: {e}")
+
+    def _unmount(self) -> None:
+        """Unmount the FUSE filesystem."""
+        try:
+            import subprocess
+            subprocess.run(
+                ["umount", self.mountpoint],
+                capture_output=True, text=True, timeout=5,
+            )
+        except Exception:
+            try:
+                subprocess.run(
+                    ["umount", "-l", self.mountpoint],
+                    capture_output=True, text=True, timeout=5,
+                )
+            except Exception:
+                pass
+
+    def _write_degraded(self, reason: str) -> None:
+        """Write a degraded status file so skills-fs consumers know the mount is unavailable."""
+        degraded_file = Path(self.mountpoint) / "SKILLS_FS_DEGRADED"
+        try:
+            info = {
+                "status": "degraded",
+                "reason": reason,
+                "timestamp": time.time(),
+                "message": "skills-fs FUSE mount is unavailable. Static files (SKILL.md, AGENTS.md) are still accessible but API endpoints will fail.",
+            }
+            Path(self.mountpoint).mkdir(parents=True, exist_ok=True)
+            degraded_file.write_text(json.dumps(info, indent=2, ensure_ascii=False))
+        except Exception:
+            pass
+
+
+async def skillsfs_monitor_task(manager: SkillsFsManager, interval: int = 10) -> None:
+    """Background task that periodically checks skills-fs health and restarts on failure."""
+    while True:
+        await asyncio.sleep(interval)
+        if manager.status == "stopped":
+            continue
+        if not manager.check():
+            manager.restart()
+# ---------------------------------------------------------------------------
 # HTTP Provider (skills-fs compatible endpoint)
 # ---------------------------------------------------------------------------
 
@@ -538,6 +796,7 @@ class NapCatHandler(BaseHTTPRequestHandler):
     processor: EventProcessor = None
     cache: EventCache = None
     events_reader: EventsReader = None
+    skillsfs_manager: SkillsFsManager = None
 
     def log_message(self, format: str, *args: Any) -> None:
         pass  # suppress default logging
@@ -602,10 +861,19 @@ class NapCatHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/status":
-            # No bot_status table - infer online from recent events.
             recent = self.cache.get(limit=10)
             online = len(recent) > 0
-            self._send_json({"online": online, "last_event": recent[-1].get("time", None) if recent else None})
+            result: dict[str, Any] = {
+                "online": online,
+                "last_event": recent[-1].get("time", None) if recent else None,
+            }
+            if self.skillsfs_manager is not None:
+                result["skills_fs"] = {
+                    "status": self.skillsfs_manager.status,
+                    "mountpoint": self.skillsfs_manager.mountpoint,
+                    "pid": self.skillsfs_manager._pid,
+                }
+            self._send_json(result)
             return
 
         if path == "/invoke":
@@ -614,6 +882,7 @@ class NapCatHandler(BaseHTTPRequestHandler):
                 "get_events", "get_event", "get_alerts",
                 "list_groups", "list_friends", "list_time_ranges",
                 "list_messages", "get_message", "get_stats",
+                "list_message_content", "get_message_content", "describe_action",
             }
             action = _first("action")
             if not action:
@@ -661,6 +930,71 @@ class NapCatHandler(BaseHTTPRequestHandler):
         except Exception as e:
             self.processor.log(f"Action {action!r} failed: {e}")
             self._send_error(500, str(e))
+    # ------------------------------------------------------------------
+    # Multi-type send/reply helper functions
+    # ------------------------------------------------------------------
+
+    def _read_file_b64(self, path: str) -> str:
+        """Read a file and return base64-encoded string."""
+        import base64
+        try:
+            with open(path, 'rb') as f:
+                data = f.read()
+        except FileNotFoundError:
+            raise ValueError(f"file not found: {path}")
+        if len(data) > 20 * 1024 * 1024:
+            raise ValueError("file too large (max 20MB)")
+        return base64.b64encode(data).decode()
+
+    def _compose_message(self, kind: str, payload: str, qq: str = None, text: str = None) -> list | str | None:
+        """Compose message segments by kind.
+        Returns a list of segments, a CQ code string, or None (for file kind).
+        """
+        if kind == "text":
+            return [{"type": "text", "data": {"text": payload}}]
+        elif kind == "image":
+            b64 = self._read_file_b64(payload)
+            return [{"type": "image", "data": {"file": f"base64://{b64}"}}]
+        elif kind == "file":
+            return None  # file upload handled separately via upload API
+        elif kind == "cqcode":
+            return payload  # return raw string, NapCat parses CQ codes
+        elif kind == "at":
+            segs = [{"type": "at", "data": {"qq": str(qq)}}]
+            if text:
+                segs.append({"type": "text", "data": {"text": text}})
+            return segs
+        elif kind == "json":
+            import json
+            return json.loads(payload)
+        else:
+            raise ValueError(f"unknown message kind: {kind}")
+
+    def _format_send_result(self, api_result: dict) -> dict:
+        """Format API send result for writeback read."""
+        if api_result.get("retcode", -1) == 0:
+            data = api_result.get("data", {})
+            mid = data.get("message_id", 0)
+            return {"status": "ok", "message_id": mid}
+        return {"error": api_result.get("message", "unknown"), "retcode": api_result.get("retcode", 0)}
+
+    def _upload_file(self, scope: str, target_id: str, path: str) -> dict:
+        """Upload a file via base64 to group or private chat."""
+        from lib.api import NapCatAPI
+        api = NapCatAPI()
+        b64 = self._read_file_b64(path)
+        import os
+        name = os.path.basename(path)
+        if scope == "group":
+            result = api.call("upload_group_file", group_id=target_id, file=f"base64://{b64}", name=name)
+        else:
+            result = api.call("upload_private_file", user_id=target_id, file=f"base64://{b64}", name=name)
+        return self._format_send_result(result)
+
+    def _compose_reply(self, base_segments: list, message_id: str) -> list:
+        """Prepend a reply segment to base segments."""
+        return [{"type": "reply", "data": {"id": str(message_id)}}] + base_segments
+
 
     def _dispatch(self, action: str, params: dict) -> Any:
         """Dispatch action to handler. Returns data for skills-fs."""
@@ -718,8 +1052,41 @@ class NapCatHandler(BaseHTTPRequestHandler):
 
         if action == "list_time_ranges":
             ranges = ["recent", "1days", "7days", "30days", "90days"]
-            return {"entries": [{"name": r, "kind": "dynamic_dir"} for r in ranges]}
-
+            entries = [{"name": r, "kind": "dynamic_dir"} for r in ranges]
+            group_id = str(params.get("group_id", ""))
+            user_id = str(params.get("user_id", ""))
+            if group_id:
+                entries.extend([
+                    {"name": "kick", "kind": "api"},
+                    {"name": "ban", "kind": "api"},
+                    {"name": "admin", "kind": "api"},
+                    {"name": "card", "kind": "api"},
+                    {"name": "name", "kind": "api"},
+                    {"name": "leave", "kind": "api"},
+                    {"name": "info", "kind": "api"},
+                    {"name": "members", "kind": "api"},
+                    {"name": "essence_list", "kind": "api"},
+                    {"name": "poke", "kind": "api"},
+                    {"name": "honor", "kind": "api"},
+                    {"name": "announce", "kind": "api"},
+                    {"name": "send", "kind": "dir"},
+                    {"name": "kick.schema", "kind": "blob"},
+                    {"name": "ban.schema", "kind": "blob"},
+                    {"name": "admin.schema", "kind": "blob"},
+                    {"name": "card.schema", "kind": "blob"},
+                    {"name": "name.schema", "kind": "blob"},
+                    {"name": "leave.schema", "kind": "blob"},
+                    {"name": "poke.schema", "kind": "blob"},
+                    {"name": "announce.schema", "kind": "blob"},
+                ])
+            elif user_id:
+                entries.extend([
+                    {"name": "info", "kind": "api"},
+                    {"name": "remark", "kind": "api"},
+                    {"name": "send", "kind": "dir"},
+                    {"name": "remark.schema", "kind": "blob"},
+                ])
+            return {"entries": entries}
         if action == "list_messages":
             group_id = str(params.get("group_id", ""))
             user_id = str(params.get("user_id", ""))
@@ -751,7 +1118,7 @@ class NapCatHandler(BaseHTTPRequestHandler):
             for r in rows:
                 mid = str(r["message_id"]) if r["message_id"] else ""
                 if mid:
-                    messages.append({"name": mid, "kind": "api", "time": r["timestamp"]})
+                    messages.append({"name": mid, "kind": "dynamic_dir", "time": r["timestamp"]})
             return {"entries": messages}
 
         if action == "get_message":
@@ -769,7 +1136,12 @@ class NapCatHandler(BaseHTTPRequestHandler):
             row = db.execute(query, qparams).fetchone()
             if row:
                 import json as json_mod
-                return json_mod.loads(row["raw_json"])
+                from lib.message import format_message, extract_file_paths
+                event = json_mod.loads(row["raw_json"])
+                msg = event.get("message", [])
+                event["formatted_text"] = format_message(msg)
+                event["files"] = extract_file_paths(msg)
+                return event
             scope = f"group {group_id}" if group_id else f"friend {user_id}"
             return {"error": f"Message {message_id} not found in {scope}"}
 
@@ -783,7 +1155,7 @@ class NapCatHandler(BaseHTTPRequestHandler):
             group_id = str(params.get("group_id", ""))
             message = params.get("message", "")
             if not group_id or not message:
-                return {"error": "group_id and message are required"}
+                return {"error": "group_id and message are required", "expected_schema": ACTION_SCHEMAS["send_group_message"]}
             from lib.api import NapCatAPI
             api = NapCatAPI()
             return api.call("send_msg", message_type="group", group_id=int(group_id) if group_id.isdigit() else group_id, message=message)
@@ -792,10 +1164,743 @@ class NapCatHandler(BaseHTTPRequestHandler):
             user_id = str(params.get("user_id", ""))
             message = params.get("message", "")
             if not user_id or not message:
-                return {"error": "user_id and message are required"}
+                return {"error": "user_id and message are required", "expected_schema": ACTION_SCHEMAS["send_private_message"]}
             from lib.api import NapCatAPI
             api = NapCatAPI()
             return api.call("send_msg", message_type="private", user_id=int(user_id) if user_id.isdigit() else user_id, message=message)
+
+        # ---- send_group_* ----
+        if action == "send_group_text":
+            group_id = str(params.get("group_id", ""))
+            payload = params.get("_payload", "")
+            if not group_id or not payload:
+                return {"error": "group_id and payload are required", "expected_schema": ACTION_SCHEMAS.get("send_group_text", {})}
+            from lib.api import NapCatAPI
+            api = NapCatAPI()
+            msg = self._compose_message("text", payload)
+            r = api.call("send_msg", message_type="group", group_id=int(group_id) if group_id.isdigit() else group_id, message=msg)
+            return self._format_send_result(r)
+
+        if action == "send_group_image":
+            group_id = str(params.get("group_id", ""))
+            payload = params.get("_payload", "")
+            if not group_id or not payload:
+                return {"error": "group_id and payload (file path) are required", "expected_schema": ACTION_SCHEMAS.get("send_group_image", {})}
+            from lib.api import NapCatAPI
+            api = NapCatAPI()
+            try:
+                msg = self._compose_message("image", payload)
+            except ValueError as e:
+                return {"error": str(e)}
+            r = api.call("send_msg", message_type="group", group_id=int(group_id) if group_id.isdigit() else group_id, message=msg)
+            return self._format_send_result(r)
+
+        if action == "send_group_file":
+            group_id = str(params.get("group_id", ""))
+            payload = params.get("_payload", "")
+            if not group_id or not payload:
+                return {"error": "group_id and payload (file path) are required", "expected_schema": ACTION_SCHEMAS.get("send_group_file", {})}
+            try:
+                return self._upload_file("group", group_id, payload)
+            except ValueError as e:
+                return {"error": str(e)}
+
+        if action == "send_group_cqcode":
+            group_id = str(params.get("group_id", ""))
+            payload = params.get("_payload", "")
+            if not group_id or not payload:
+                return {"error": "group_id and payload (CQ code) are required", "expected_schema": ACTION_SCHEMAS.get("send_group_cqcode", {})}
+            from lib.api import NapCatAPI
+            api = NapCatAPI()
+            msg = self._compose_message("cqcode", payload)
+            r = api.call("send_msg", message_type="group", group_id=int(group_id) if group_id.isdigit() else group_id, message=msg)
+            return self._format_send_result(r)
+
+        if action == "send_group_at":
+            group_id = str(params.get("group_id", ""))
+            qq = str(params.get("qq", ""))
+            text = str(params.get("text", ""))
+            if not group_id or not qq:
+                return {"error": "group_id and qq are required", "expected_schema": ACTION_SCHEMAS.get("send_group_at", {})}
+            from lib.api import NapCatAPI
+            api = NapCatAPI()
+            msg = self._compose_message("at", None, qq=qq, text=text)
+            r = api.call("send_msg", message_type="group", group_id=int(group_id) if group_id.isdigit() else group_id, message=msg)
+            return self._format_send_result(r)
+
+        if action == "send_group_json":
+            group_id = str(params.get("group_id", ""))
+            message = params.get("message", "")
+            if not group_id or not message:
+                return {"error": "group_id and message are required", "expected_schema": ACTION_SCHEMAS.get("send_group_json", {})}
+            from lib.api import NapCatAPI
+            api = NapCatAPI()
+            r = api.call("send_msg", message_type="group", group_id=int(group_id) if group_id.isdigit() else group_id, message=message)
+            return self._format_send_result(r)
+
+        # ---- send_private_* ----
+        if action == "send_private_text":
+            user_id = str(params.get("user_id", ""))
+            payload = params.get("_payload", "")
+            if not user_id or not payload:
+                return {"error": "user_id and payload are required", "expected_schema": ACTION_SCHEMAS.get("send_private_text", {})}
+            from lib.api import NapCatAPI
+            api = NapCatAPI()
+            msg = self._compose_message("text", payload)
+            r = api.call("send_msg", message_type="private", user_id=int(user_id) if user_id.isdigit() else user_id, message=msg)
+            return self._format_send_result(r)
+
+        if action == "send_private_image":
+            user_id = str(params.get("user_id", ""))
+            payload = params.get("_payload", "")
+            if not user_id or not payload:
+                return {"error": "user_id and payload (file path) are required", "expected_schema": ACTION_SCHEMAS.get("send_private_image", {})}
+            from lib.api import NapCatAPI
+            api = NapCatAPI()
+            try:
+                msg = self._compose_message("image", payload)
+            except ValueError as e:
+                return {"error": str(e)}
+            r = api.call("send_msg", message_type="private", user_id=int(user_id) if user_id.isdigit() else user_id, message=msg)
+            return self._format_send_result(r)
+
+        if action == "send_private_file":
+            user_id = str(params.get("user_id", ""))
+            payload = params.get("_payload", "")
+            if not user_id or not payload:
+                return {"error": "user_id and payload (file path) are required", "expected_schema": ACTION_SCHEMAS.get("send_private_file", {})}
+            try:
+                return self._upload_file("private", user_id, payload)
+            except ValueError as e:
+                return {"error": str(e)}
+
+        if action == "send_private_cqcode":
+            user_id = str(params.get("user_id", ""))
+            payload = params.get("_payload", "")
+            if not user_id or not payload:
+                return {"error": "user_id and payload (CQ code) are required", "expected_schema": ACTION_SCHEMAS.get("send_private_cqcode", {})}
+            from lib.api import NapCatAPI
+            api = NapCatAPI()
+            msg = self._compose_message("cqcode", payload)
+            r = api.call("send_msg", message_type="private", user_id=int(user_id) if user_id.isdigit() else user_id, message=msg)
+            return self._format_send_result(r)
+
+        if action == "send_private_at":
+            user_id = str(params.get("user_id", ""))
+            qq = str(params.get("qq", ""))
+            text = str(params.get("text", ""))
+            if not user_id or not qq:
+                return {"error": "user_id and qq are required", "expected_schema": ACTION_SCHEMAS.get("send_private_at", {})}
+            from lib.api import NapCatAPI
+            api = NapCatAPI()
+            msg = self._compose_message("at", None, qq=qq, text=text)
+            r = api.call("send_msg", message_type="private", user_id=int(user_id) if user_id.isdigit() else user_id, message=msg)
+            return self._format_send_result(r)
+
+        if action == "send_private_json":
+            user_id = str(params.get("user_id", ""))
+            message = params.get("message", "")
+            if not user_id or not message:
+                return {"error": "user_id and message are required", "expected_schema": ACTION_SCHEMAS.get("send_private_json", {})}
+            from lib.api import NapCatAPI
+            api = NapCatAPI()
+            r = api.call("send_msg", message_type="private", user_id=int(user_id) if user_id.isdigit() else user_id, message=message)
+            return self._format_send_result(r)
+
+        # ---- reply_group_* ----
+        if action == "reply_group_text":
+            group_id = str(params.get("group_id", ""))
+            message_id = str(params.get("message_id", ""))
+            payload = params.get("_payload", "")
+            if not group_id or not message_id or not payload:
+                return {"error": "group_id, message_id, and payload are required", "expected_schema": ACTION_SCHEMAS.get("reply_group_text", {})}
+            from lib.api import NapCatAPI
+            api = NapCatAPI()
+            base = self._compose_message("text", payload)
+            msg = self._compose_reply(base, message_id)
+            r = api.call("send_msg", message_type="group", group_id=int(group_id) if group_id.isdigit() else group_id, message=msg)
+            return self._format_send_result(r)
+
+        if action == "reply_group_image":
+            group_id = str(params.get("group_id", ""))
+            message_id = str(params.get("message_id", ""))
+            payload = params.get("_payload", "")
+            if not group_id or not message_id or not payload:
+                return {"error": "group_id, message_id, and payload are required", "expected_schema": ACTION_SCHEMAS.get("reply_group_image", {})}
+            from lib.api import NapCatAPI
+            api = NapCatAPI()
+            try:
+                base = self._compose_message("image", payload)
+            except ValueError as e:
+                return {"error": str(e)}
+            msg = self._compose_reply(base, message_id)
+            r = api.call("send_msg", message_type="group", group_id=int(group_id) if group_id.isdigit() else group_id, message=msg)
+            return self._format_send_result(r)
+
+        if action == "reply_group_file":
+            group_id = str(params.get("group_id", ""))
+            payload = params.get("_payload", "")
+            if not group_id or not payload:
+                return {"error": "group_id and payload (file path) are required", "expected_schema": ACTION_SCHEMAS.get("reply_group_file", {})}
+            try:
+                return self._upload_file("group", group_id, payload)
+            except ValueError as e:
+                return {"error": str(e)}
+
+        if action == "reply_group_cqcode":
+            group_id = str(params.get("group_id", ""))
+            message_id = str(params.get("message_id", ""))
+            payload = params.get("_payload", "")
+            if not group_id or not message_id or not payload:
+                return {"error": "group_id, message_id, and payload are required", "expected_schema": ACTION_SCHEMAS.get("reply_group_cqcode", {})}
+            from lib.api import NapCatAPI
+            api = NapCatAPI()
+            cq_str = self._compose_message("cqcode", payload)
+            msg = [{"type": "reply", "data": {"id": str(message_id)}}, {"type": "text", "data": {"text": cq_str}}]
+            r = api.call("send_msg", message_type="group", group_id=int(group_id) if group_id.isdigit() else group_id, message=msg)
+            return self._format_send_result(r)
+
+        if action == "reply_group_at":
+            group_id = str(params.get("group_id", ""))
+            message_id = str(params.get("message_id", ""))
+            qq = str(params.get("qq", ""))
+            text = str(params.get("text", ""))
+            if not group_id or not message_id or not qq:
+                return {"error": "group_id, message_id, and qq are required", "expected_schema": ACTION_SCHEMAS.get("reply_group_at", {})}
+            from lib.api import NapCatAPI
+            api = NapCatAPI()
+            base = self._compose_message("at", None, qq=qq, text=text)
+            msg = self._compose_reply(base, message_id)
+            r = api.call("send_msg", message_type="group", group_id=int(group_id) if group_id.isdigit() else group_id, message=msg)
+            return self._format_send_result(r)
+
+        if action == "reply_group_json":
+            group_id = str(params.get("group_id", ""))
+            message_id = str(params.get("message_id", ""))
+            message = params.get("message", "")
+            if not group_id or not message_id or not message:
+                return {"error": "group_id, message_id, and message are required", "expected_schema": ACTION_SCHEMAS.get("reply_group_json", {})}
+            from lib.api import NapCatAPI
+            api = NapCatAPI()
+            msg = [{"type": "reply", "data": {"id": str(message_id)}}] + message
+            r = api.call("send_msg", message_type="group", group_id=int(group_id) if group_id.isdigit() else group_id, message=msg)
+            return self._format_send_result(r)
+
+        # ---- reply_private_* ----
+        if action == "reply_private_text":
+            user_id = str(params.get("user_id", ""))
+            message_id = str(params.get("message_id", ""))
+            payload = params.get("_payload", "")
+            if not user_id or not message_id or not payload:
+                return {"error": "user_id, message_id, and payload are required", "expected_schema": ACTION_SCHEMAS.get("reply_private_text", {})}
+            from lib.api import NapCatAPI
+            api = NapCatAPI()
+            base = self._compose_message("text", payload)
+            msg = self._compose_reply(base, message_id)
+            r = api.call("send_msg", message_type="private", user_id=int(user_id) if user_id.isdigit() else user_id, message=msg)
+            return self._format_send_result(r)
+
+        if action == "reply_private_image":
+            user_id = str(params.get("user_id", ""))
+            message_id = str(params.get("message_id", ""))
+            payload = params.get("_payload", "")
+            if not user_id or not message_id or not payload:
+                return {"error": "user_id, message_id, and payload are required", "expected_schema": ACTION_SCHEMAS.get("reply_private_image", {})}
+            from lib.api import NapCatAPI
+            api = NapCatAPI()
+            try:
+                base = self._compose_message("image", payload)
+            except ValueError as e:
+                return {"error": str(e)}
+            msg = self._compose_reply(base, message_id)
+            r = api.call("send_msg", message_type="private", user_id=int(user_id) if user_id.isdigit() else user_id, message=msg)
+            return self._format_send_result(r)
+
+        if action == "reply_private_file":
+            user_id = str(params.get("user_id", ""))
+            payload = params.get("_payload", "")
+            if not user_id or not payload:
+                return {"error": "user_id and payload (file path) are required", "expected_schema": ACTION_SCHEMAS.get("reply_private_file", {})}
+            try:
+                return self._upload_file("private", user_id, payload)
+            except ValueError as e:
+                return {"error": str(e)}
+
+        if action == "reply_private_cqcode":
+            user_id = str(params.get("user_id", ""))
+            message_id = str(params.get("message_id", ""))
+            payload = params.get("_payload", "")
+            if not user_id or not message_id or not payload:
+                return {"error": "user_id, message_id, and payload are required", "expected_schema": ACTION_SCHEMAS.get("reply_private_cqcode", {})}
+            from lib.api import NapCatAPI
+            api = NapCatAPI()
+            cq_str = self._compose_message("cqcode", payload)
+            msg = [{"type": "reply", "data": {"id": str(message_id)}}, {"type": "text", "data": {"text": cq_str}}]
+            r = api.call("send_msg", message_type="private", user_id=int(user_id) if user_id.isdigit() else user_id, message=msg)
+            return self._format_send_result(r)
+
+        if action == "reply_private_at":
+            user_id = str(params.get("user_id", ""))
+            message_id = str(params.get("message_id", ""))
+            qq = str(params.get("qq", ""))
+            text = str(params.get("text", ""))
+            if not user_id or not message_id or not qq:
+                return {"error": "user_id, message_id, and qq are required", "expected_schema": ACTION_SCHEMAS.get("reply_private_at", {})}
+            from lib.api import NapCatAPI
+            api = NapCatAPI()
+            base = self._compose_message("at", None, qq=qq, text=text)
+            msg = self._compose_reply(base, message_id)
+            r = api.call("send_msg", message_type="private", user_id=int(user_id) if user_id.isdigit() else user_id, message=msg)
+            return self._format_send_result(r)
+
+        if action == "reply_private_json":
+            user_id = str(params.get("user_id", ""))
+            message_id = str(params.get("message_id", ""))
+            message = params.get("message", "")
+            if not user_id or not message_id or not message:
+                return {"error": "user_id, message_id, and message are required", "expected_schema": ACTION_SCHEMAS.get("reply_private_json", {})}
+            from lib.api import NapCatAPI
+            api = NapCatAPI()
+            msg = [{"type": "reply", "data": {"id": str(message_id)}}] + message
+            r = api.call("send_msg", message_type="private", user_id=int(user_id) if user_id.isdigit() else user_id, message=msg)
+            return self._format_send_result(r)
+
+
+        # ---- send_group_* ----
+        if action == "send_group_text":
+            group_id = str(params.get("group_id", ""))
+            payload = params.get("_payload", "")
+            if not group_id or not payload:
+                return {"error": "group_id and payload are required", "expected_schema": ACTION_SCHEMAS.get("send_group_text", {})}
+            from lib.api import NapCatAPI
+            api = NapCatAPI()
+            msg = self._compose_message("text", payload)
+            r = api.call("send_msg", message_type="group", group_id=int(group_id) if group_id.isdigit() else group_id, message=msg)
+            return self._format_send_result(r)
+
+        if action == "send_group_image":
+            group_id = str(params.get("group_id", ""))
+            payload = params.get("_payload", "")
+            if not group_id or not payload:
+                return {"error": "group_id and payload (file path) are required", "expected_schema": ACTION_SCHEMAS.get("send_group_image", {})}
+            from lib.api import NapCatAPI
+            api = NapCatAPI()
+            try:
+                msg = self._compose_message("image", payload)
+            except ValueError as e:
+                return {"error": str(e)}
+            r = api.call("send_msg", message_type="group", group_id=int(group_id) if group_id.isdigit() else group_id, message=msg)
+            return self._format_send_result(r)
+
+        if action == "send_group_file":
+            group_id = str(params.get("group_id", ""))
+            payload = params.get("_payload", "")
+            if not group_id or not payload:
+                return {"error": "group_id and payload (file path) are required", "expected_schema": ACTION_SCHEMAS.get("send_group_file", {})}
+            try:
+                return self._upload_file("group", group_id, payload)
+            except ValueError as e:
+                return {"error": str(e)}
+
+        if action == "send_group_cqcode":
+            group_id = str(params.get("group_id", ""))
+            payload = params.get("_payload", "")
+            if not group_id or not payload:
+                return {"error": "group_id and payload (CQ code string) are required", "expected_schema": ACTION_SCHEMAS.get("send_group_cqcode", {})}
+            from lib.api import NapCatAPI
+            api = NapCatAPI()
+            msg = self._compose_message("cqcode", payload)
+            r = api.call("send_msg", message_type="group", group_id=int(group_id) if group_id.isdigit() else group_id, message=msg)
+            return self._format_send_result(r)
+
+        if action == "send_group_at":
+            group_id = str(params.get("group_id", ""))
+            qq = str(params.get("qq", ""))
+            text = str(params.get("text", ""))
+            if not group_id or not qq:
+                return {"error": "group_id and qq are required", "expected_schema": ACTION_SCHEMAS.get("send_group_at", {})}
+            from lib.api import NapCatAPI
+            api = NapCatAPI()
+            msg = self._compose_message("at", None, qq=qq, text=text)
+            r = api.call("send_msg", message_type="group", group_id=int(group_id) if group_id.isdigit() else group_id, message=msg)
+            return self._format_send_result(r)
+
+        if action == "send_group_json":
+            group_id = str(params.get("group_id", ""))
+            message = params.get("message", "")
+            if not group_id or not message:
+                return {"error": "group_id and message are required", "expected_schema": ACTION_SCHEMAS.get("send_group_json", {})}
+            from lib.api import NapCatAPI
+            api = NapCatAPI()
+            r = api.call("send_msg", message_type="group", group_id=int(group_id) if group_id.isdigit() else group_id, message=message)
+            return self._format_send_result(r)
+
+        # ---- send_private_* ----
+        if action == "send_private_text":
+            user_id = str(params.get("user_id", ""))
+            payload = params.get("_payload", "")
+            if not user_id or not payload:
+                return {"error": "user_id and payload are required", "expected_schema": ACTION_SCHEMAS.get("send_private_text", {})}
+            from lib.api import NapCatAPI
+            api = NapCatAPI()
+            msg = self._compose_message("text", payload)
+            r = api.call("send_msg", message_type="private", user_id=int(user_id) if user_id.isdigit() else user_id, message=msg)
+            return self._format_send_result(r)
+
+        if action == "send_private_image":
+            user_id = str(params.get("user_id", ""))
+            payload = params.get("_payload", "")
+            if not user_id or not payload:
+                return {"error": "user_id and payload (file path) are required", "expected_schema": ACTION_SCHEMAS.get("send_private_image", {})}
+            from lib.api import NapCatAPI
+            api = NapCatAPI()
+            try:
+                msg = self._compose_message("image", payload)
+            except ValueError as e:
+                return {"error": str(e)}
+            r = api.call("send_msg", message_type="private", user_id=int(user_id) if user_id.isdigit() else user_id, message=msg)
+            return self._format_send_result(r)
+
+        if action == "send_private_file":
+            user_id = str(params.get("user_id", ""))
+            payload = params.get("_payload", "")
+            if not user_id or not payload:
+                return {"error": "user_id and payload (file path) are required", "expected_schema": ACTION_SCHEMAS.get("send_private_file", {})}
+            try:
+                return self._upload_file("private", user_id, payload)
+            except ValueError as e:
+                return {"error": str(e)}
+
+        if action == "send_private_cqcode":
+            user_id = str(params.get("user_id", ""))
+            payload = params.get("_payload", "")
+            if not user_id or not payload:
+                return {"error": "user_id and payload (CQ code string) are required", "expected_schema": ACTION_SCHEMAS.get("send_private_cqcode", {})}
+            from lib.api import NapCatAPI
+            api = NapCatAPI()
+            msg = self._compose_message("cqcode", payload)
+            r = api.call("send_msg", message_type="private", user_id=int(user_id) if user_id.isdigit() else user_id, message=msg)
+            return self._format_send_result(r)
+
+        if action == "send_private_at":
+            user_id = str(params.get("user_id", ""))
+            qq = str(params.get("qq", ""))
+            text = str(params.get("text", ""))
+            if not user_id or not qq:
+                return {"error": "user_id and qq are required", "expected_schema": ACTION_SCHEMAS.get("send_private_at", {})}
+            from lib.api import NapCatAPI
+            api = NapCatAPI()
+            msg = self._compose_message("at", None, qq=qq, text=text)
+            r = api.call("send_msg", message_type="private", user_id=int(user_id) if user_id.isdigit() else user_id, message=msg)
+            return self._format_send_result(r)
+
+        if action == "send_private_json":
+            user_id = str(params.get("user_id", ""))
+            message = params.get("message", "")
+            if not user_id or not message:
+                return {"error": "user_id and message are required", "expected_schema": ACTION_SCHEMAS.get("send_private_json", {})}
+            from lib.api import NapCatAPI
+            api = NapCatAPI()
+            r = api.call("send_msg", message_type="private", user_id=int(user_id) if user_id.isdigit() else user_id, message=message)
+            return self._format_send_result(r)
+
+        # ---- reply_group_* ----
+        if action == "reply_group_text":
+            group_id = str(params.get("group_id", ""))
+            message_id = str(params.get("message_id", ""))
+            payload = params.get("_payload", "")
+            if not group_id or not message_id or not payload:
+                return {"error": "group_id, message_id, and payload are required", "expected_schema": ACTION_SCHEMAS.get("reply_group_text", {})}
+            from lib.api import NapCatAPI
+            api = NapCatAPI()
+            base = self._compose_message("text", payload)
+            msg = self._compose_reply(base, message_id)
+            r = api.call("send_msg", message_type="group", group_id=int(group_id) if group_id.isdigit() else group_id, message=msg)
+            return self._format_send_result(r)
+
+        if action == "reply_group_image":
+            group_id = str(params.get("group_id", ""))
+            message_id = str(params.get("message_id", ""))
+            payload = params.get("_payload", "")
+            if not group_id or not message_id or not payload:
+                return {"error": "group_id, message_id, and payload are required", "expected_schema": ACTION_SCHEMAS.get("reply_group_image", {})}
+            from lib.api import NapCatAPI
+            api = NapCatAPI()
+            try:
+                base = self._compose_message("image", payload)
+            except ValueError as e:
+                return {"error": str(e)}
+            msg = self._compose_reply(base, message_id)
+            r = api.call("send_msg", message_type="group", group_id=int(group_id) if group_id.isdigit() else group_id, message=msg)
+            return self._format_send_result(r)
+
+        if action == "reply_group_file":
+            group_id = str(params.get("group_id", ""))
+            payload = params.get("_payload", "")
+            if not group_id or not payload:
+                return {"error": "group_id and payload (file path) are required", "expected_schema": ACTION_SCHEMAS.get("reply_group_file", {})}
+            try:
+                return self._upload_file("group", group_id, payload)
+            except ValueError as e:
+                return {"error": str(e)}
+
+        if action == "reply_group_cqcode":
+            group_id = str(params.get("group_id", ""))
+            message_id = str(params.get("message_id", ""))
+            payload = params.get("_payload", "")
+            if not group_id or not message_id or not payload:
+                return {"error": "group_id, message_id, and payload are required", "expected_schema": ACTION_SCHEMAS.get("reply_group_cqcode", {})}
+            from lib.api import NapCatAPI
+            api = NapCatAPI()
+            cq_str = self._compose_message("cqcode", payload)
+            msg = [{"type": "reply", "data": {"id": str(message_id)}}, {"type": "text", "data": {"text": cq_str}}]
+            r = api.call("send_msg", message_type="group", group_id=int(group_id) if group_id.isdigit() else group_id, message=msg)
+            return self._format_send_result(r)
+
+        if action == "reply_group_at":
+            group_id = str(params.get("group_id", ""))
+            message_id = str(params.get("message_id", ""))
+            qq = str(params.get("qq", ""))
+            text = str(params.get("text", ""))
+            if not group_id or not message_id or not qq:
+                return {"error": "group_id, message_id, and qq are required", "expected_schema": ACTION_SCHEMAS.get("reply_group_at", {})}
+            from lib.api import NapCatAPI
+            api = NapCatAPI()
+            base = self._compose_message("at", None, qq=qq, text=text)
+            msg = self._compose_reply(base, message_id)
+            r = api.call("send_msg", message_type="group", group_id=int(group_id) if group_id.isdigit() else group_id, message=msg)
+            return self._format_send_result(r)
+
+        if action == "reply_group_json":
+            group_id = str(params.get("group_id", ""))
+            message_id = str(params.get("message_id", ""))
+            message = params.get("message", "")
+            if not group_id or not message_id or not message:
+                return {"error": "group_id, message_id, and message are required", "expected_schema": ACTION_SCHEMAS.get("reply_group_json", {})}
+            from lib.api import NapCatAPI
+            api = NapCatAPI()
+            msg = [{"type": "reply", "data": {"id": str(message_id)}}] + message
+            r = api.call("send_msg", message_type="group", group_id=int(group_id) if group_id.isdigit() else group_id, message=msg)
+            return self._format_send_result(r)
+
+        # ---- reply_private_* ----
+        if action == "reply_private_text":
+            user_id = str(params.get("user_id", ""))
+            message_id = str(params.get("message_id", ""))
+            payload = params.get("_payload", "")
+            if not user_id or not message_id or not payload:
+                return {"error": "user_id, message_id, and payload are required", "expected_schema": ACTION_SCHEMAS.get("reply_private_text", {})}
+            from lib.api import NapCatAPI
+            api = NapCatAPI()
+            base = self._compose_message("text", payload)
+            msg = self._compose_reply(base, message_id)
+            r = api.call("send_msg", message_type="private", user_id=int(user_id) if user_id.isdigit() else user_id, message=msg)
+            return self._format_send_result(r)
+
+        if action == "reply_private_image":
+            user_id = str(params.get("user_id", ""))
+            message_id = str(params.get("message_id", ""))
+            payload = params.get("_payload", "")
+            if not user_id or not message_id or not payload:
+                return {"error": "user_id, message_id, and payload are required", "expected_schema": ACTION_SCHEMAS.get("reply_private_image", {})}
+            from lib.api import NapCatAPI
+            api = NapCatAPI()
+            try:
+                base = self._compose_message("image", payload)
+            except ValueError as e:
+                return {"error": str(e)}
+            msg = self._compose_reply(base, message_id)
+            r = api.call("send_msg", message_type="private", user_id=int(user_id) if user_id.isdigit() else user_id, message=msg)
+            return self._format_send_result(r)
+
+        if action == "reply_private_file":
+            user_id = str(params.get("user_id", ""))
+            payload = params.get("_payload", "")
+            if not user_id or not payload:
+                return {"error": "user_id and payload (file path) are required", "expected_schema": ACTION_SCHEMAS.get("reply_private_file", {})}
+            try:
+                return self._upload_file("private", user_id, payload)
+            except ValueError as e:
+                return {"error": str(e)}
+
+        if action == "reply_private_cqcode":
+            user_id = str(params.get("user_id", ""))
+            message_id = str(params.get("message_id", ""))
+            payload = params.get("_payload", "")
+            if not user_id or not message_id or not payload:
+                return {"error": "user_id, message_id, and payload are required", "expected_schema": ACTION_SCHEMAS.get("reply_private_cqcode", {})}
+            from lib.api import NapCatAPI
+            api = NapCatAPI()
+            cq_str = self._compose_message("cqcode", payload)
+            msg = [{"type": "reply", "data": {"id": str(message_id)}}, {"type": "text", "data": {"text": cq_str}}]
+            r = api.call("send_msg", message_type="private", user_id=int(user_id) if user_id.isdigit() else user_id, message=msg)
+            return self._format_send_result(r)
+
+        if action == "reply_private_at":
+            user_id = str(params.get("user_id", ""))
+            message_id = str(params.get("message_id", ""))
+            qq = str(params.get("qq", ""))
+            text = str(params.get("text", ""))
+            if not user_id or not message_id or not qq:
+                return {"error": "user_id, message_id, and qq are required", "expected_schema": ACTION_SCHEMAS.get("reply_private_at", {})}
+            from lib.api import NapCatAPI
+            api = NapCatAPI()
+            base = self._compose_message("at", None, qq=qq, text=text)
+            msg = self._compose_reply(base, message_id)
+            r = api.call("send_msg", message_type="private", user_id=int(user_id) if user_id.isdigit() else user_id, message=msg)
+            return self._format_send_result(r)
+
+        if action == "reply_private_json":
+            user_id = str(params.get("user_id", ""))
+            message_id = str(params.get("message_id", ""))
+            message = params.get("message", "")
+            if not user_id or not message_id or not message:
+                return {"error": "user_id, message_id, and message are required", "expected_schema": ACTION_SCHEMAS.get("reply_private_json", {})}
+            from lib.api import NapCatAPI
+            api = NapCatAPI()
+            msg = [{"type": "reply", "data": {"id": str(message_id)}}] + message
+            r = api.call("send_msg", message_type="private", user_id=int(user_id) if user_id.isdigit() else user_id, message=msg)
+            return self._format_send_result(r)
+        if action == "list_message_content":
+            message_id = str(params.get("message_id", ""))
+            group_id = str(params.get("group_id", ""))
+            user_id = str(params.get("user_id", ""))
+            query = "SELECT raw_json FROM events WHERE post_type='message' AND message_id = ?"
+            qparams = [message_id]
+            if group_id:
+                query += " AND group_id = ?"
+                qparams.append(int(group_id))
+            if user_id:
+                query += " AND user_id = ?"
+                qparams.append(int(user_id))
+            row = db.execute(query, qparams).fetchone()
+            if not row:
+                return {"error": f"Message {message_id} not found"}
+            event = json.loads(row["raw_json"])
+            segments = event.get("message", [])
+            entries = [{"name": "metadata", "kind": "api"}, {"name": "text", "kind": "api"}, {"name": "reply", "kind": "dir"}]
+            image_count = 0
+            for seg in segments:
+                stype = seg.get("type", "")
+                if stype == "image":
+                    image_count += 1
+                    entries.append({"name": f"image" if image_count == 1 else f"image_{image_count}", "kind": "api"})
+                elif stype == "file":
+                    file_count += 1
+                    entries.append({"name": f"file" if file_count == 1 else f"file_{file_count}", "kind": "api"})
+                elif stype == "video":
+                    entries.append({"name": "video", "kind": "api"})
+                elif stype == "record":
+                    entries.append({"name": "record", "kind": "api"})
+                elif stype == "forward":
+                    entries.append({"name": "forward", "kind": "api"})
+            return {"entries": entries}
+
+        if action == "get_message_content":
+            message_id = str(params.get("message_id", ""))
+            content = str(params.get("content", ""))
+            group_id = str(params.get("group_id", ""))
+            user_id = str(params.get("user_id", ""))
+            query = "SELECT raw_json FROM events WHERE post_type='message' AND message_id = ?"
+            qparams = [message_id]
+            if group_id:
+                query += " AND group_id = ?"
+                qparams.append(int(group_id))
+            if user_id:
+                query += " AND user_id = ?"
+                qparams.append(int(user_id))
+            row = db.execute(query, qparams).fetchone()
+            if not row:
+                return {"error": f"Message {message_id} not found"}
+            event = json.loads(row["raw_json"])
+            segments = event.get("message", [])
+            if not content:
+                # No selector: return all available content
+                result = {
+                    "metadata": {
+                        "message_id": event.get("message_id"),
+                        "sender": event.get("sender", {}).get("nickname", ""),
+                        "time": event.get("time"),
+                        "group_id": event.get("group_id"),
+                        "user_id": event.get("user_id"),
+                        "message_type": event.get("message_type"),
+                    },
+                }
+                texts = [seg.get("data", {}).get("text", "") for seg in segments if seg.get("type") == "text"]
+                if texts:
+                    result["text"] = "\n".join(texts)
+                for seg in segments:
+                    stype = seg.get("type", "")
+                    if stype == "image":
+                        result.setdefault("image", []).append(seg.get("data", {}))
+                    elif stype == "video":
+                        result.setdefault("video", []).append(seg.get("data", {}))
+                    elif stype == "record":
+                        result.setdefault("record", []).append(seg.get("data", {}))
+                    elif stype == "file":
+                        result.setdefault("file", []).append(seg.get("data", {}))
+                    elif stype == "forward":
+                        result.setdefault("forward", []).append(seg.get("data", {}))
+                return result
+
+            if content == "metadata":
+                return {
+                    "message_id": event.get("message_id"),
+                    "sender": event.get("sender", {}).get("nickname", ""),
+                    "time": event.get("time"),
+                    "group_id": event.get("group_id"),
+                    "user_id": event.get("user_id"),
+                    "message_type": event.get("message_type"),
+                }
+
+            if content == "text":
+                texts = [seg.get("data", {}).get("text", "") for seg in segments if seg.get("type") == "text"]
+                return {"text": "\n".join(texts)}
+
+            # Parse image/file selectors like "image", "image_2", "file_3"
+            if content.startswith("image") or content.startswith("file"):
+                base = content.rsplit("_", 1)[0] if "_" in content else content
+                if "_" in content:
+                    try:
+                        idx = int(content.rsplit("_", 1)[1])
+                    except ValueError:
+                        return {"error": f"Invalid content selector: {content}"}
+                else:
+                    idx = 1
+                collected = []
+                for seg in segments:
+                    if seg.get("type") == base:
+                        collected.append(seg.get("data", {}))
+                if idx <= len(collected):
+                    return collected[idx - 1]
+                return {"error": f"Content {content} not found in message"}
+
+            if content == "video":
+                for seg in segments:
+                    if seg.get("type") == "video":
+                        return seg.get("data", {})
+                return {"error": "No video in message"}
+
+            if content == "record":
+                for seg in segments:
+                    if seg.get("type") == "record":
+                        return seg.get("data", {})
+                return {"error": "No record in message"}
+
+            if content == "forward":
+                for seg in segments:
+                    if seg.get("type") == "forward":
+                        return seg.get("data", {})
+                return {"error": "No forward in message"}
+
+            return {"error": f"Unknown content selector: {content}"}
+
+        if action == "describe_action":
+            action_name = params.get("action", "")
+            schema = ACTION_SCHEMAS.get(action_name)
+            if schema:
+                return schema
+            return {"error": f"Unknown action: {action_name}"}
 
         # Proxy NapCat API calls through napcat_ prefix
         if action.startswith("napcat_"):
@@ -813,11 +1918,13 @@ def run_http_server(
     cache: EventCache,
     port: int = 18820,
     host: str = "0.0.0.0",
+    skillsfs_manager: SkillsFsManager | None = None,
 ) -> HTTPServer:
     """Start HTTP provider in a background thread. Returns the server."""
     NapCatHandler.processor = processor
     NapCatHandler.cache = cache
     NapCatHandler.events_reader = EventsReader(cache.data_dir)
+    NapCatHandler.skillsfs_manager = skillsfs_manager
 
     server = HTTPServer((host, port), NapCatHandler)
     t = threading.Thread(target=server.serve_forever, daemon=True)
@@ -909,15 +2016,36 @@ def run_daemon(config_path: str) -> None:
     api_url = cfg_data.get("api_url", os.environ.get("NAPCAT_API_URL", "http://127.0.0.1:18801"))
     token = cfg_data.get("token", os.environ.get("NAPCAT_TOKEN", ""))
 
-    # Start HTTP provider
-    server = run_http_server(processor, cache, http_port)
+    # --- Start skills-fs FUSE mount ---
+    skills_fs_enabled = cfg_data.get("skills_fs_enabled", True)
+    skills_fs_mountpoint = cfg_data.get(
+        "skills_fs_mountpoint", _DEFAULT_MOUNTPOINT
+    )
+    skills_fs_binary = cfg_data.get("skills_fs_binary", "")
+    skills_fs_config = cfg_data.get(
+        "skills_fs_config", _DEFAULT_SKILLSFS_CONFIG
+    )
 
+    skillsfs_mgr: SkillsFsManager | None = None
+    if skills_fs_enabled:
+        skillsfs_mgr = SkillsFsManager(
+            processor,
+            mountpoint=skills_fs_mountpoint,
+            binary=skills_fs_binary,
+            config=skills_fs_config,
+        )
+        skillsfs_mgr.start()
+
+    # Start HTTP provider (after skills-fs so handler can reference manager)
+    server = run_http_server(processor, cache, http_port, skillsfs_manager=skillsfs_mgr)
     # Signal handling
     loop = asyncio.new_event_loop()
 
     def shutdown_handler(signum: int, frame: Any) -> None:
         processor.log("Shutting down...")
         pid_file.unlink(missing_ok=True)
+        if skillsfs_mgr is not None:
+            skillsfs_mgr.stop()
         server.shutdown()
         loop.call_soon_threadsafe(loop.stop)
 
@@ -928,12 +2056,16 @@ def run_daemon(config_path: str) -> None:
     processor.log(f"WebSocket URL: {ws_url}")
     processor.log(f"HTTP provider port: {http_port}")
 
-    # Run WS daemon and health check as parallel tasks
-    ws_task = loop.create_task(ws_daemon(ws_url, processor, cache))
-    hc_task = loop.create_task(health_check_task(processor, api_url, token))
+    # Run WS daemon, health check, and skills-fs monitor as parallel tasks
+    tasks = [
+        loop.create_task(ws_daemon(ws_url, processor, cache)),
+        loop.create_task(health_check_task(processor, api_url, token)),
+    ]
+    if skillsfs_mgr is not None:
+        tasks.append(loop.create_task(skillsfs_monitor_task(skillsfs_mgr)))
 
     # Wait for either to finish (shutdown or WS crash)
-    done, _ = loop.run_until_complete(asyncio.wait([ws_task, hc_task], return_when=asyncio.FIRST_COMPLETED))
+    done, _ = loop.run_until_complete(asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED))
     for t in done:
         if t.exception():
             processor.log(f"Task exception: {t.exception()}")
