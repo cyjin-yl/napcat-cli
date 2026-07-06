@@ -55,7 +55,7 @@ ACTION_SCHEMAS: dict[str, dict] = {
         "params": ["message_id"],
         "example": {"message_id": "987654321"},
         "required": ["message_id"],
-        "description": "Delete/recall a sent message.",
+        "description": "Delete/recall a sent message. Rules: bot recalling its own message must act within 2 minutes. Admin can recall any member message with no time limit. Group owner can recall any message with no time limit.",
     },
     "napcat_set_group_kick": {
         "params": ["group_id", "user_id", "reject_add_request"],
