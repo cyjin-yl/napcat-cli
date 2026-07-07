@@ -10,7 +10,6 @@ Usage:
     napcat file <command> [args...]
     napcat daemon [start|stop|status]
     napcat config [get|set] <key> [value]
-    napcat events [--type TYPE] [--since TIMESTAMP] [--limit N]
     napcat alerts [--clear]
 
 Environment:
@@ -20,6 +19,7 @@ Environment:
 """
 from __future__ import annotations
 
+from napcat_cli.__init__ import __version__
 import argparse
 import json
 import os
@@ -31,9 +31,9 @@ import base64
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
-from lib.api import NapCatAPI
-from lib.config import get_config, DATA_DIR
-from lib.events import EventsReader
+from napcat_cli.lib.api import NapCatAPI
+from napcat_cli.lib.config import get_config, DATA_DIR
+from napcat_cli.lib.events import EventsReader
 
 
 
@@ -353,7 +353,7 @@ def cmd_file(args: argparse.Namespace, api: NapCatAPI) -> int:
 def cmd_daemon(args: argparse.Namespace, api: NapCatAPI) -> int:
     """napcat daemon - Manage the watch daemon."""
     import subprocess
-    daemon_py = ROOT / "daemon" / "watch.py"
+    # daemon launched via -m
 
     if args.subcommand == "start":
         # Check for existing daemon before starting a new one
@@ -377,11 +377,15 @@ def cmd_daemon(args: argparse.Namespace, api: NapCatAPI) -> int:
             "http_port": cfg.http_port,
             "group_trigger_word": cfg.group_trigger_word,
             "private_trigger": cfg.private_trigger,
+            "skills_fs_enabled": cfg.skills_fs_enabled,
+            "skills_fs_mountpoint": cfg.skills_fs_mountpoint,
+            "skills_fs_binary": cfg.skills_fs_binary,
+            "skills_fs_config": cfg.skills_fs_config,
         }
         cfg_path.write_text(json.dumps(cfg_dict, indent=2))
 
         # Launch daemon as background process
-        cmd = [sys.executable, str(daemon_py), str(cfg_path)]
+        cmd = [sys.executable, "-m", "napcat_cli.daemon.watch", str(cfg_path)]
         proc = subprocess.Popen(cmd, stdout=open(DATA_DIR / "daemon.log", "a"), stderr=subprocess.STDOUT)
         print(f"Daemon started (PID: {proc.pid})", file=sys.stderr)
         print(f"Log: {DATA_DIR / 'daemon.log'}")
@@ -454,12 +458,12 @@ def cmd_events(args: argparse.Namespace, api: NapCatAPI) -> int:
 
 def cmd_alerts(args: argparse.Namespace, api: NapCatAPI) -> int:
     """napcat alerts - Check or clear alerts from SQLite database."""
-    from lib.events import EventsReader
+    from napcat_cli.lib.events import EventsReader
     reader = EventsReader(DATA_DIR)
 
     if getattr(args, "subcommand", None) == "clear":
         reader._get_conn()
-        from lib.events_sqlite import clear_alerts
+        from napcat_cli.lib.events_sqlite import clear_alerts
         count = clear_alerts(reader._conn)
         print(f"All alerts cleared ({count} removed)", file=sys.stderr)
         return 0
@@ -1176,6 +1180,62 @@ FS_TREE = """\
 """
 
 
+def cmd_wake(args: argparse.Namespace, api: NapCatAPI) -> int:
+    """napcat wake - Trigger a daemon wake."""
+    from napcat_cli.wake import build_wake_command
+
+    cfg = get_config()
+    reason = args.reason
+
+    # Method 1: wake_command (shell command)
+    if cfg.wake_command:
+        cmd = build_wake_command(cfg.wake_command, reason)
+        if cmd:
+            if getattr(args, "dry_run", False):
+                print(cmd)
+                return 0
+            try:
+                import subprocess
+                result = subprocess.run(cmd, shell=True, check=True, timeout=30,
+                    capture_output=True, text=True)
+                if result.stdout:
+                    print(result.stdout, end="")
+                print(f"Wake command executed: {reason}")
+                return 0
+            except Exception as e:
+                print(f"Wake command failed: {e}", file=sys.stderr)
+                return 1
+
+    # Method 2: HTTP wake via daemon alert
+    try:
+        import urllib.request
+        import urllib.parse
+        host = urllib.parse.urlparse(cfg.api_url).hostname or "127.0.0.1"
+        url = f"http://{host}:{cfg.http_port}/alert"
+        data = json.dumps({"alert": "NAPCAT_CLI_WAKE", "reason": reason}).encode()
+        req = urllib.request.Request(url, data=data, method="POST",
+            headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            print(f"Wake alert sent via daemon (port {cfg.http_port}): {reason}")
+            return 0
+    except Exception as e:
+        print(f"Daemon HTTP wake failed: {e}", file=sys.stderr)
+
+    # Method 3: Write alert file as fallback
+    alert_file = DATA_DIR / cfg.alert_dir / "wake.json"
+    try:
+        alert_file.write_text(json.dumps({
+            "alert": "NAPCAT_CLI_WAKE",
+            "reason": reason,
+            "timestamp": int(__import__("time").time())
+        }))
+        print(f"Wake alert written to {alert_file}: {reason}")
+        return 0
+    except Exception as e:
+        print(f"Wake failed: {e}", file=sys.stderr)
+        return 1
+
+
 def cmd_fs(args: argparse.Namespace, api: NapCatAPI) -> int:
     """napcat fs - Show skills-fs directory tree and workflow."""
     cfg = get_config()
@@ -1186,7 +1246,9 @@ def cmd_fs(args: argparse.Namespace, api: NapCatAPI) -> int:
     try:
         import urllib.request
         import urllib.error
-        url = f"http://127.0.0.1:{port}/status"
+        import urllib.parse
+        host = urllib.parse.urlparse(cfg.api_url).hostname or "127.0.0.1"
+        url = f"http://{host}:{port}/status"
         req = urllib.request.Request(url)
         with urllib.request.urlopen(req, timeout=5) as resp:
             status_data = json.loads(resp.read().decode("utf-8"))
@@ -1210,21 +1272,10 @@ def cmd_fs(args: argparse.Namespace, api: NapCatAPI) -> int:
         print("  Not available (daemon not running or skills-fs disabled)")
         print()
 
-    # Walk the mountpoint
-    if skills_fs_info and skills_fs_info.get("mountpoint"):
-        mp = Path(skills_fs_info["mountpoint"])
-        if mp.exists():
-            print("=== Mountpoint Contents ===")
-            for item in sorted(mp.iterdir()):
-                kind = "dir" if item.is_dir() else "file"
-                print(f"  {item.name}/" if item.is_dir() else f"  {item.name}")
-                if item.is_dir():
-                    for sub in sorted(item.iterdir()):
-                        if sub.is_dir():
-                            print(f"    {sub.name}/")
-                        else:
-                            print(f"    {sub.name}")
-            print()
+    # Do not traverse the FUSE mountpoint — it may block (D-state).
+    print("Mountpoint contents: use `napcat events` / `napcat alerts`, or `ls <mountpoint>` manually.")
+    print("  (CLI does not traverse the FUSE mount to avoid blocking.)")
+    print()
 
     # Show static tree & workflow
     print(FS_TREE)
@@ -1250,7 +1301,7 @@ def main() -> int:
     parser.add_argument("--timeout", type=int, default=None, help="API request timeout in seconds (default: 30)")
     parser.add_argument("--json", action="store_true", help="Output JSON only (suppress stderr)")
     parser.add_argument("--quiet", action="store_true", help="Suppress stderr output")
-    parser.add_argument("--version", action="version", version="napcat-cli 1.0.0")
+    parser.add_argument("--version", action="version", version=f"napcat-cli {__version__}")
 
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
 
@@ -1570,6 +1621,18 @@ def main() -> int:
 
     # --- fs ---
     subparsers.add_parser("fs", help="Show skills-fs directory tree and workflow")
+
+    # --- wake ---
+    wake_p = subparsers.add_parser("wake", help="Trigger a daemon wake")
+    wake_p.add_argument("--reason", "-r", default="manual", help="Wake reason (default: manual)")
+    wake_p.add_argument("--dry-run", action="store_true", help="Print wake command without executing")
+
+    # --- setup ---
+    setup_p = subparsers.add_parser("setup", help="Interactive setup wizard")
+    setup_p.add_argument("--non-interactive", action="store_true")
+    setup_p.add_argument("--yes", "-y", action="store_true")
+    setup_p.add_argument("--force", action="store_true")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -1618,6 +1681,8 @@ def main() -> int:
         "schedule": cmd_schedule,
         "get_cookies": cmd_get_cookies,
         "get_stranger_info": cmd_get_stranger_info,
+        "wake": cmd_wake,
+        "setup": lambda a, api: __import__("napcat_cli.setup_wizard", fromlist=["run_setup"]).run_setup(a.non_interactive, a.yes, a.force),
     }
 
     handler = commands.get(args.command)

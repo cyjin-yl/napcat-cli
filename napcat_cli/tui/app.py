@@ -6,7 +6,7 @@ from typing import Any
 from textual.app import App, ComposeResult
 from textual.widgets import Footer, Header
 
-from lib.message import format_message
+from napcat_cli.lib.message import format_message
 from .api import ChatItem, DaemonClient, get_client
 
 

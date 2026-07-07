@@ -1,389 +1,151 @@
-# NapCat CLI
+# napcat-cli
 
 Standalone CLI and daemon for NapCat QQ bot management with skills-fs integration.
 
-## Overview
+---
 
-NapCat CLI provides two interfaces for interacting with your QQ bot:
-
-1. **CLI Tools** — Direct command-line access to all NapCat API features
-2. **skills-fs Integration** — Filesystem-based API exposure for AI agents
-
-### Architecture
-
-```
-┌─────────────┐         WebSocket         ┌──────────────┐
-│   NapCat    │◄─────────────────────────┤   Daemon     │
-│  Server     │                          │  (watch.py)  │
-└─────────────┘                           └──────────────┘
-       │ HTTP API                                │
-       │                                         │ Events + Alerts
-       ▼                                         ▼
-┌─────────────┐                          ┌──────────────┐
-│  napcat     │◄─────────────────────────┤ Filesystem  │
-│    CLI      │   HTTP Provider (18821)  │   Bridge     │
-└─────────────┘                          └──────────────┘
-                                                  │
-                                                  ▼
-                                         ┌──────────────────┐
-                                         │   skills-fs      │
-                                         │  Virtual Files   │
-                                         └──────────────────┘
-                                                  │
-                                                  ▼
-                                         ┌──────────────────┐
-                                         │  AI Agent        │
-                                         │  (Hermes)        │
-                                         └──────────────────┘
-```
-
-### Components
-
-- **`napcat` CLI** — Command-line interface for all QQ bot operations
-- **`daemon/watch.py`** — WebSocket listener + HTTP provider server
-- **`lib/`** — Core API client and event handling
-- **`skills-fs/`** — Virtual filesystem engine (submodule)
-
-## skills-fs Integration
-
-The skills-fs integration exposes QQ bot capabilities as an intuitive virtual filesystem:
-
-### Filesystem Structure
-
-```
-~/.napcat-cli/skills/napcat-cli/          # FUSE mountpoint
-├── SKILL.md                          # Auto-generated skill documentation
-├── AGENTS.md                         # Agent guide: daemon setup and navigation
-├── persona.md                        # Bot persona / system prompt artifact
-├── napcat/                           # API endpoints as files
-│   ├── events/                       # Real-time event stream
-│   ├── alerts/                       # Pending notifications
-│   ├── groups/                       # Dynamic directory: group IDs
-│   │   └── {group_id}/             # Dynamic directory: time ranges + send file
-│   │       ├── AGENTS.md
-│   │       ├── send                # Write message JSON to send to this group
-│   │       └── {recent,1days,...}/ # Dynamic directory: message IDs
-│   │           └── {message_id}    # API file: read message metadata
-│   ├── friends/                      # Dynamic directory: user IDs
-│   │   └── {user_id}/              # Dynamic directory: time ranges + send file
-│   │       ├── AGENTS.md
-│   │       ├── send                # Write message JSON to send to this friend
-│   │       └── {recent,1days,...}/ # Dynamic directory: message IDs
-│   │           └── {message_id}    # API file: read message metadata
-│   ├── send_group                    # Legacy group send endpoint
-│   ├── send_private                  # Legacy private send endpoint
-│   └── ...                           # Other API endpoints
-```
-
-### How It Works
-
-1. **Browse Intuitively** — Navigate `napcat/` to explore endpoints.
-2. **Read Operations** — Files contain data (JSON, text, etc.).
-3. **Write Operations** — Writing JSON to a write-enabled file triggers the corresponding NapCat API call. The JSON payload is forwarded as provider parameters (requires `writeParams: "json"`).
-4. **Dynamic Directories** — `napcat/groups/{group_id}/...` and `napcat/friends/{user_id}/...` are provider-backed directories that render IDs, time ranges, and message IDs on demand. Each directory also exposes a `send` file scoped to that group or friend.
-5. **Auto-Generated Docs** — `SKILL.md` is generated from the skill definition and exposed at the FUSE root via `exposeAtRoot: true`.
-6. **Persona Artifact** — `persona.md` is mounted as a blob at the FUSE root for agents to read the bot persona.
-7. **Agent Guidance (AGENTS.md)** — Per-directory `AGENTS.md` files describe what each directory contains and what parameters are available, so agents can navigate without guessing.
-
-### Example: Agent Workflow
+napcat-cli provides a CLI for all NapCat API operations, a WebSocket daemon
+that bridges to a skills-fs HTTP provider, and an agent wake-up mechanism for
+integrating with Hermes or other AI agents.
 
 ```bash
-# Check bot status
-cat ~/.napcat-cli/skills/napcat-cli/napcat/status
-
-# Read recent events
-cat ~/.napcat-cli/skills/napcat-cli/napcat/events
-
-# Browse group messages dynamically
-ls ~/.napcat-cli/skills/napcat-cli/napcat/groups
-ls ~/.napcat-cli/skills/napcat-cli/napcat/groups/123456
-cat ~/.napcat-cli/skills/napcat-cli/napcat/groups/123456/AGENTS.md
-ls ~/.napcat-cli/skills/napcat-cli/napcat/groups/123456/recent
-cat ~/.napcat-cli/skills/napcat-cli/napcat/groups/123456/recent/1001
-
-# Send to a specific group by writing to its send file
-echo '{"message": "Hello group!"}' > ~/.napcat-cli/skills/napcat-cli/napcat/groups/123456/send
-
-# Browse private friend messages
-ls ~/.napcat-cli/skills/napcat-cli/napcat/friends
-ls ~/.napcat-cli/skills/napcat-cli/napcat/friends/987654
-cat ~/.napcat-cli/skills/napcat-cli/napcat/friends/987654/recent/2001
-
-# Send to a specific friend
-echo '{"message": "Hi!"}' > ~/.napcat-cli/skills/napcat-cli/napcat/friends/987654/send
-
-# Clear a specific alert
-echo '{"name": "NEW_MESSAGE"}' > ~/.napcat-cli/skills/napcat-cli/napcat/clear_alert
-```
-
-## CLI Usage
-
-### Basic Commands
-
-```bash
-# Check bot status
-napcat status
-
-# List groups
-napcat group list
-
-# List group members
-napcat group members <group_id>
-
-# Send messages
-napcat send group <group_id> -m "<message>" [--at USER_ID]
-napcat send private <user_id> -m "<message>"
-
-# Message management
-napcat recall <message_id> [--group <group_id>]
-
-# Friend operations
-napcat friend list
-napcat friend info <user_id>
-
-# Events and alerts
-napcat events --type message --limit 10
-napcat alerts --clear
-```
-
-### API Access
-
-```bash
-# Raw API access (like `gh api`)
-napcat api get_login_info
-napcat api send_group_msg '{"group_id": 123456, "message": "Hello"}'
-
-# Custom API endpoint
-napcat api .send_poke '{"user_id": 123456}'
-```
-
-### Daemon Management
-
-```bash
-# Start the daemon (WebSocket + HTTP provider)
+napcat send group 123456 -m "Hello"
+napcat send private 987654 -m "Hi"
+napcat recall 1001
+napcat events --limit 10
 napcat daemon start
-
-# Check daemon status
-napcat daemon status
-
-# Stop the daemon
-napcat daemon stop
+napcat wake --reason NEW_MESSAGE
 ```
-
-## Installation
-
-### Prerequisites
-
-- Python 3.10+
-- NapCat server running (Docker or native)
-- Go compiler (for skills-fs build)
-
-### Setup
-
-1. **Clone repository**
-   ```bash
-   git clone https://github.com/255doesnotexist/napcat-cli.git
-   cd napcat-cli
-   ```
-
-2. **Initialize submodules**
-   ```bash
-   git submodule update --init --recursive
-   ```
-
-3. **Build skills-fs**
-   ```bash
-   cd skills-fs
-   make build
-   cd ..
-   ```
-
-4. **Install napcat CLI**
-   ```bash
-   chmod +x napcat
-   sudo ln -s $(pwd)/napcat ~/.local/bin/napcat
-   ```
-
-5. **Configure**
-   ```bash
-   napcat config set api_url http://127.0.0.1:18801
-   napcat config set token ""
-   napcat config set self_id 123456789
-   ```
-
-## Configuration
-
-### Environment Variables
-
-- `NAPCAT_API_URL` — NapCat HTTP API endpoint (default: `http://127.0.0.1:18801`)
-- `NAPCAT_TOKEN` — API authentication token
-- `NAPCAT_DATA_DIR` — Data directory (default: `~/.napcat-data`)
-
-### skills-fs Configuration
-
-A sample `skills-fs-config.json` is shipped in the repository root. Copy it to the runtime location and adjust the home path if needed:
-
-```bash
-cp skills-fs-config.json ~/.napcat-cli/skills-fs.json
-```
-
-Key configuration points:
-
-- **FUSE mountpoint** — Start `skills-fs` with `--mountpoint ~/.napcat-cli/skills/napcat-cli` (no `-fs` suffix). The generated `SKILL.md` is exposed at the FUSE root via `exposeAtRoot: true`.
-- **Payload forwarding** — Every write-enabled API mount uses `"writeParams": "json"` so that the JSON written to the file is forwarded as provider parameters.
-- **Persona artifact** — `persona.md` is mounted as a blob at `/persona.md`.
-
-Note: because `skillsRoot` is `~/.napcat-cli/skills`, the skill generator writes `SKILL.md` to `~/.napcat-cli/skills/napcat-cli/SKILL.md` before the FUSE daemon mounts. After FUSE mounts, that on-disk file is hidden and replaced by the virtual `/SKILL.md` exposed by `exposeAtRoot: true`. This is expected.
-
-### Running skills-fs
-
-```bash
-skills-fs fuse --config ~/.napcat-cli/skills-fs.json \
-  --mountpoint ~/.napcat-cli/skills/napcat-cli \
-  --allow-other \
-  --log-file ~/.napcat-cli/skills-fuse.log
-```
-
-If you need to validate or regenerate the config while FUSE is already mounted, unmount it first (e.g. `fusermount3 -u ~/.napcat-cli/skills/napcat-cli`), then validate and remount.
-
-Example minimal config snippet:
-
-```json
-{
-  "providers": [
-    { "id": "napcat", "url": "http://127.0.0.1:18821/invoke" }
-  ],
-  "skillsRoot": "$HOME/.napcat-cli/skills",
-  "skills": [
-    {
-      "name": "napcat-cli",
-      "description": "NapCat QQ bot messaging — send messages, read events, manage groups, handle friends",
-      "enabled": true,
-      "version": "1.0.0",
-      "author": "Ezra",
-      "license": "MIT",
-      "platforms": ["linux"],
-      "metadata": { "source": "napcat-cli", "category": "messaging" },
-      "allowedTools": ["read_file", "write_file", "list_directory"],
-      "bodyTemplate": "# NapCat CLI Skill\n...",
-      "exposeAtRoot": true
-    }
-  ],
-  "mounts": [
-    { "path": "/napcat", "kind": "dir", "mode": "0755" },
-    { "path": "/persona.md", "kind": "blob", "mode": "0444", "data": "..." },
-    {
-      "path": "/napcat/send_group",
-      "kind": "api",
-      "provider": "napcat",
-      "read": "napcat_send_group_msg",
-      "write": "napcat_send_group_msg",
-      "mode": "0644",
-      "writeParams": "json"
-    }
-  ]
-}
-```
-
-## Daemon Features
-
-The daemon (`daemon/watch.py`) provides:
-
-### Real-time Event Processing
-
-- **Messages** — Group and private messages
-- **Notices** — Poke, recall, ban, admin changes, member join/leave
-- **Requests** — Friend and group requests
-- **Meta** — Connection status, heartbeat
-
-### Alert System
-
-The daemon generates alert files for important events:
-
-- `NAPCAT_CLI_NEW_MESSAGE` — Any new message
-- `NAPCAT_CLI_AT_ME` — Bot was @mentioned
-- `NAPCAT_CLI_REPLY_TO_ME` — Reply to bot's message
-- `NAPCAT_CLI_NEW_POKE` — Poke received
-- `NAPCAT_CLI_NEW_REQUEST` — Friend/group request
-- `NAPCAT_CLI_NEED_WAKE_UP` — Composite alert for agent attention
-
-### Wake Command
-
-When `wake_on_event` is `true` in config, the daemon executes `wake_command` for important events (friend requests, @mentions, bans, kicks, etc.). The command string supports one variable:
-- `$REASON` / `${REASON}` / `{reason}` — replaced with the event reason code. Possible values: `AT_ME`, `REPLY_TO_ME`, `GROUP_TRIGGER`, `PRIVATE_TRIGGER`, `NEW_POKE`, `PROFILE_LIKE`, `GROUP_ADMIN_CHANGE`, `BOT_BANNED`, `BOT_KICKED_FROM_GROUP`, `GROUP_DISBANDED`, `NEW_GROUP_MEMBER`, `MY_MESSAGE_RECALLED`, `NEW_FRIEND`, `NEW_REQUEST`, `BOT_OFFLINE`
-
-**Examples for different agents:**
-
-```bash
-# Hermes
-napcat config set wake_command "hermes send --to weixin 'QQ事件: \$REASON，请检查 ~/.napcat-data/alerts/ 并考虑回复'"
-
-# Claude Code (notify via file watch or custom script)
-napcat config set wake_command "echo 'QQ事件: \$REASON，请检查 ~/.napcat-data/alerts/ 并考虑回复' >> ~/.napcat-data/.agent-wake"
-
-# Generic shell script
-napcat config set wake_command "/path/to/notify.sh 'QQ事件: \$REASON，请检查 ~/.napcat-data/alerts/ 并考虑回复'"
-```
-
-**Security**: `wake_command` runs verbatim via `shell=True` with the user's privileges. Do not paste untrusted templates.
-
-### HTTP Provider
-
-Daemon runs HTTP server implementing skills-fs provider contract:
-
-- **Endpoint**: `http://127.0.0.1:18821`
-- **Actions**: `get_events`, `get_alerts`, `clear_alert`, `list_groups`, `list_friends`, `list_time_ranges`, `list_messages`, `get_message`, `send_group_message`, `send_private_message`, `napcat_*` (API proxy)
-- **Format**: JSON request/response
-
-Dynamic directory actions return entries in the format `{"entries": [{"name": "...", "kind": "..."}]}` so skills-fs can render them as directories.
-
-## Development
-
-### Project Structure
-
-```
-napcat-cli/
-├── napcat              # Main CLI script
-├── config.py           # Configuration management
-├── skills-fs-config.json  # Sample skills-fs configuration (shipped with repo)
-├── persona.md         # Bot persona configuration (mounted as FUSE artifact)
-├── lib/
-│   ├── api.py         # NapCat HTTP API client
-│   ├── events.py      # Event filesystem bridge
-│   └── config.py      # Data directory paths
-├── daemon/
-│   └── watch.py       # WebSocket daemon + HTTP provider
-├── skills-fs/         # Virtual filesystem (submodule)
-└── README.md          # This file
-```
-
-### Running Tests
-
-```bash
-# Test CLI commands
-napcat status
-napcat group list
-
-# Test daemon
-python3 daemon/watch.py ~/.napcat-data/daemon.json
-
-# Test skills-fs
-cd skills-fs && make test
-```
-
-## Contributing
-
-Contributions welcome! Proudly powered by [skills-fs](https://github.com/yandu-app/skills-fs).
-## License
-
-Same as parent project.
-
-## Related Projects
-
-- [NapCat](https://github.com/NapNeko/NapCatQQ-Docker) — NapCat OneBot 11 implementation
-- [skills-fs](https://github.com/yandu-app/skills-fs) — Virtual filesystem engine
-- [Hermes](https://github.com/yandu-app/hermes) — AI agent framework (if applicable)
 
 ---
 
-**Note**: This project is designed for integration with AI agent frameworks. The filesystem-based API design makes it intuitive for agents to explore and interact with QQ bot capabilities through familiar file operations.
+## Commands
+
+| Command | Description |
+|---------|-------------|
+| `napcat api <endpoint>` | Raw API access (like `gh api`) |
+| `napcat send group <id> -m "msg"` | Send group message |
+| `napcat send private <id> -m "msg"` | Send private message |
+| `napcat reply <id> -m "msg"` | Reply to a message |
+| `napcat recall <msg_id>` | Recall a message |
+| `napcat group <sub>` | Group list, members, settings |
+| `napcat friend <sub>` | Friend list, info |
+| `napcat file <sub>` | File upload, download, list |
+| `napcat events` | Read events from SQLite |
+| `napcat alerts [--clear]` | Pending alerts |
+| `napcat status` | Bot online status |
+| `napcat config get/set` | Configuration management |
+| `napcat daemon start/stop/status/restart` | Watch daemon |
+| `napcat fs tree` | Skills-fs directory tree |
+| `napcat wake [--reason R] [--dry-run]` | Trigger agent wake |
+| `napcat setup` | Interactive setup wizard |
+| `napcat phone` | Textual phone-style TUI |
+
+---
+
+## Setup
+
+```bash
+uv tool install napcat-cli
+napcat setup          # interactive — guides token, data dir, skills-fs, wake
+napcat daemon start
+```
+
+The setup wizard writes two config files:
+
+- `<data_dir>/config.json` — API URL, token, self_id, ports, triggers
+- `<data_dir>/daemon.json` — All fields consumed by `watch.py` including `skills_fs_*` settings
+
+Non-interactive mode uses defaults:
+
+```bash
+napcat setup --non-interactive  # no prompts, validates token
+napcat setup --yes              # skip token validation
+napcat setup --force            # overwrite existing config
+```
+
+---
+
+## Agent Wake
+
+Events can trigger a wake command that runs a shell command (e.g. `hermes -z`).
+
+Configure via:
+
+```bash
+napcat config set wake_on_event true
+napcat config set wake_command 'hermes -c session -z "new QQ message" -s napcat-cli --yolo'
+```
+
+The `$REASON`, `${REASON}`, and `{reason}` placeholders in `wake_command` are
+replaced with the event reason (e.g. `AT_ME`, `NEW_MESSAGE`).
+
+Supported triggers: `AT_ME`, `REPLY_TO_ME`, `GROUP_TRIGGER`, `PRIVATE_TRIGGER`,
+`NEW_POKE`, `NEW_FRIEND_REQUEST`, `NEW_GROUP_REQUEST`, `NEW_MESSAGE`.
+
+Manual trigger:
+
+```bash
+napcat wake                        # reason: manual
+napcat wake --reason NEW_MESSAGE   # custom reason
+napcat wake --dry-run              # print command without executing
+```
+
+---
+
+## Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `NAPCAT_API_URL` | `http://127.0.0.1:18801` | NapCat HTTP endpoint |
+| `NAPCAT_TOKEN` | — | API auth token |
+| `NAPCAT_DATA_DIR` | `~/.napcat-data` | Data directory |
+
+---
+
+## skills-fs Integration
+
+The daemon runs an HTTP provider server (port 18820/18821) that skills-fs calls
+to read/write NapCat API endpoints through the virtual filesystem.
+
+When `skills_fs_enabled` is true in `daemon.json`, the daemon spawns skills-fs
+automatically with the configured mountpoint and config file.
+
+Manual start:
+
+```bash
+skills-fs fuse --config ~/.napcat-data/skills-fs.json \
+  --mountpoint ~/.napcat-data/skills/napcat-cli --allow-other
+```
+
+---
+
+## Development
+
+```
+napcat-cli/
+├── napcat_cli/          # Installable package
+│   ├── cli.py           # CLI entry point
+│   ├── wake.py          # Wake command builder
+│   ├── setup_wizard.py  # Setup wizard
+│   ├── daemon/          # Watch daemon, schemas
+│   ├── lib/             # API, config, events
+│   ├── tui/             # Textual TUI
+│   └── data/            # SKILL.md, persona.md
+├── pyproject.toml
+├── tests/
+├── skills-fs/           # Go submodule
+└── tools/               # Dev utilities
+```
+
+```bash
+python -m pytest tests/ -v
+python -m build --wheel
+uv build && uv publish
+```
+
+---
+
+## License
+
+MIT

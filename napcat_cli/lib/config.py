@@ -6,13 +6,23 @@ import os
 from dataclasses import dataclass, fields, asdict
 from pathlib import Path
 
-# Default data directory
-_DEFAULT_DATA_DIR = Path(os.environ.get("NAPCAT_DATA_DIR", Path.home() / ".napcat-data"))
 
-DATA_DIR = Path(os.environ.get("NAPCAT_DATA_DIR", str(_DEFAULT_DATA_DIR)))
-DATA_DIR.mkdir(parents=True, exist_ok=True)
+def _get_data_dir() -> Path:
+    """Return the data directory, re-computed from env each call."""
+    return Path(os.environ.get("NAPCAT_DATA_DIR", str(Path.home() / ".napcat-data")))
 
-CONFIG_FILE = DATA_DIR / "config.json"
+
+class _LazyPath:
+    """Lazy proxy: re-reads NAPCAT_DATA_DIR on each access."""
+    def __truediv__(self, other):
+        return _get_data_dir() / other
+    def __str__(self):
+        return str(_get_data_dir())
+    def __repr__(self):
+        return f"DATA_DIR({_get_data_dir()!s})"
+
+
+DATA_DIR = _LazyPath()
 
 
 @dataclass
@@ -32,28 +42,29 @@ class NapCatConfig:
     group_trigger_word: str = ""
     private_trigger: str = "*"
 
-    # skills-fs integration — spawn/monitor FUSE mount alongside the daemon
+    # skills-fs integration
     skills_fs_enabled: bool = True
-    skills_fs_binary: str = ""  # "" = search PATH or use shipped binary
-    skills_fs_mountpoint: str = ""  # "" = default to ~/.napcat-data/skills
-    skills_fs_config: str = ""  # "" = default to ~/.napcat-data/skills-fs.json
+    skills_fs_binary: str = ""
+    skills_fs_mountpoint: str = ""
+    skills_fs_config: str = ""
 
     def save(self) -> None:
         """Save config to file atomically via temp file then rename."""
         import os
-        tmp_path = CONFIG_FILE.with_suffix(".tmp")
+        data_dir = _get_data_dir()
+        config_file = data_dir / "config.json"
+        tmp_path = config_file.with_suffix(".tmp")
         tmp_path.write_text(json.dumps(asdict(self), indent=2, ensure_ascii=False))
-        os.replace(str(tmp_path), str(CONFIG_FILE))
+        os.replace(str(tmp_path), str(config_file))
 
     def set(self, key: str, value: str) -> None:
         """Set a config value by key name."""
         if hasattr(self, key):
-            # Type conversion
             attr = getattr(self, key)
-            if isinstance(attr, int):
-                value = int(value)
-            elif isinstance(attr, bool) and isinstance(value, str):
+            if isinstance(attr, bool):
                 value = value.lower() in ("true", "1", "yes")
+            elif isinstance(attr, int):
+                value = int(value)
             setattr(self, key, value)
         else:
             raise ValueError(f"Unknown config key: {key}. Available: {', '.join(f.name for f in fields(NapCatConfig))}")
@@ -61,17 +72,20 @@ class NapCatConfig:
 
 def get_config() -> NapCatConfig:
     """Load config from file or create default."""
-    if CONFIG_FILE.exists():
+    data_dir = _get_data_dir()
+    config_file = data_dir / "config.json"
+    if config_file.exists():
         try:
-            data = json.loads(CONFIG_FILE.read_text())
+            data = json.loads(config_file.read_text())
             return NapCatConfig(**data)
         except Exception:
             pass
     return NapCatConfig()
 
 
-def ensure_data_dirs() -> None:
-    """Create required subdirectories."""
+def ensure_dirs() -> None:
+    """Ensure events and alerts directories exist."""
     cfg = get_config()
-    (DATA_DIR / cfg.event_dir).mkdir(exist_ok=True)
-    (DATA_DIR / cfg.alert_dir).mkdir(exist_ok=True)
+    data_dir = _get_data_dir()
+    (data_dir / cfg.event_dir).mkdir(exist_ok=True)
+    (data_dir / cfg.alert_dir).mkdir(exist_ok=True)

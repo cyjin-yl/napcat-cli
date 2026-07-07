@@ -35,10 +35,10 @@ from urllib.parse import parse_qs, urlparse
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from lib.config import DATA_DIR, get_config
-from lib.events import EventsWriter, EventsReader
+from napcat_cli.lib.config import DATA_DIR, get_config
+from napcat_cli.lib.events import EventsWriter, EventsReader
 
-from daemon.schemas import ACTION_SCHEMAS
+from napcat_cli.daemon.schemas import ACTION_SCHEMAS
 
 
 # ---------------------------------------------------------------------------
@@ -431,17 +431,12 @@ class EventProcessor:
             self.log(f"Executing wake command: {self.wake_command}")
             try:
                 import subprocess
-                import shlex
-                # Replace $REASON with quoted actual reason to prevent shell injection
-                safe_reason = shlex.quote(reason)
-                cmd = self.wake_command.replace("$REASON", safe_reason).replace("${REASON}", safe_reason).replace("{reason}", safe_reason)
+                from napcat_cli.wake import build_wake_command
+                cmd = build_wake_command(self.wake_command, reason)
                 subprocess.run(cmd, shell=True, check=True, timeout=30,
                              capture_output=True, text=True)
             except Exception as e:
                 self.log(f"Wake command failed: {e}")
-
-                # Failed pokes are best-effort; do not block event processing
-                self.log(f"Wake poke failed: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -539,7 +534,10 @@ async def ws_daemon(ws_url: str, processor: EventProcessor, cache: EventCache) -
 
 _DEFAULT_MOUNTPOINT = str(Path.home() / ".napcat-data" / "skills")
 _DEFAULT_SKILLSFS_CONFIG = str(Path.home() / ".napcat-data" / "skills-fs.json")
-_SHIPPED_BINARY = str(Path(__file__).resolve().parent.parent / "skills-fs" / "skills-fs")
+def _resolve_shipped_binary() -> str:
+    """Return the shipped skills-fs binary path for source-tree dev mode, or '' if absent."""
+    shipped = Path(__file__).resolve().parents[2] / "skills-fs" / "skills-fs"
+    return str(shipped) if shipped.exists() and shipped.is_file() else ""
 
 
 class SkillsFsManager:
@@ -569,7 +567,7 @@ class SkillsFsManager:
         self.binary = binary
         if not self.binary:
             # Try shipped binary next to this repo
-            shipped = Path(_SHIPPED_BINARY)
+            shipped = Path(_resolve_shipped_binary())
             if shipped.exists() and shipped.is_file():
                 self.binary = str(shipped)
             else:
@@ -983,7 +981,7 @@ class NapCatHandler(BaseHTTPRequestHandler):
 
     def _upload_file(self, scope: str, target_id: str, path: str) -> dict:
         """Upload a file via base64 to group or private chat."""
-        from lib.api import NapCatAPI
+        from napcat_cli.lib.api import NapCatAPI
         api = NapCatAPI()
         b64 = self._read_file_b64(path)
         import os
@@ -1001,7 +999,7 @@ class NapCatHandler(BaseHTTPRequestHandler):
 
     def _dispatch(self, action: str, params: dict) -> Any:
         """Dispatch action to handler. Returns data for skills-fs."""
-        from lib.events_sqlite import get_connection, read_events as db_read_events, read_alerts as db_read_alerts, get_event_count
+        from napcat_cli.lib.events_sqlite import get_connection, read_events as db_read_events, read_alerts as db_read_alerts, get_event_count
         db = get_connection(self.cache.data_dir)
 
         if action == "get_events":
@@ -1016,7 +1014,7 @@ class NapCatHandler(BaseHTTPRequestHandler):
 
         if action == "get_event":
             event_id = params.get("id", "")
-            from lib.events_sqlite import read_events as db_read
+            from napcat_cli.lib.events_sqlite import read_events as db_read
             events = db_read(db, limit=1000)
             for e in events:
                 if str(e.get("message_id", "")) == event_id:
@@ -1029,12 +1027,12 @@ class NapCatHandler(BaseHTTPRequestHandler):
 
         if action == "clear_alert":
             name = params.get("name") or params.get("alert_name", "")
-            from lib.events_sqlite import clear_alerts
+            from napcat_cli.lib.events_sqlite import clear_alerts
             count = clear_alerts(self.processor.writer.conn, name)
             return {"cleared": count}
 
         if action == "clear_all_alerts":
-            from lib.events_sqlite import clear_alerts
+            from napcat_cli.lib.events_sqlite import clear_alerts
             count = clear_alerts(self.processor.writer.conn)
             return {"cleared": count}
 
@@ -1139,7 +1137,7 @@ class NapCatHandler(BaseHTTPRequestHandler):
             row = db.execute(query, qparams).fetchone()
             if row:
                 import json as json_mod
-                from lib.message import format_message, extract_file_paths
+                from napcat_cli.lib.message import format_message, extract_file_paths
                 event = json_mod.loads(row["raw_json"])
                 msg = event.get("message", [])
                 event["formatted_text"] = format_message(msg)
@@ -1150,7 +1148,7 @@ class NapCatHandler(BaseHTTPRequestHandler):
 
         if action == "get_stats":
             event_count = get_event_count(db)
-            from lib.events_sqlite import get_alert_count
+            from napcat_cli.lib.events_sqlite import get_alert_count
             alert_count = get_alert_count(db)
             return {"event_count": event_count, "alert_count": alert_count}
 
@@ -1159,7 +1157,7 @@ class NapCatHandler(BaseHTTPRequestHandler):
             message = params.get("message", "")
             if not group_id or not message:
                 return {"error": "group_id and message are required", "expected_schema": ACTION_SCHEMAS["send_group_message"]}
-            from lib.api import NapCatAPI
+            from napcat_cli.lib.api import NapCatAPI
             api = NapCatAPI()
             return api.call("send_msg", message_type="group", group_id=int(group_id) if group_id.isdigit() else group_id, message=message)
 
@@ -1168,7 +1166,7 @@ class NapCatHandler(BaseHTTPRequestHandler):
             message = params.get("message", "")
             if not user_id or not message:
                 return {"error": "user_id and message are required", "expected_schema": ACTION_SCHEMAS["send_private_message"]}
-            from lib.api import NapCatAPI
+            from napcat_cli.lib.api import NapCatAPI
             api = NapCatAPI()
             return api.call("send_msg", message_type="private", user_id=int(user_id) if user_id.isdigit() else user_id, message=message)
 
@@ -1178,7 +1176,7 @@ class NapCatHandler(BaseHTTPRequestHandler):
             payload = params.get("_payload", "")
             if not group_id or not payload:
                 return {"error": "group_id and payload are required", "expected_schema": ACTION_SCHEMAS.get("send_group_text", {})}
-            from lib.api import NapCatAPI
+            from napcat_cli.lib.api import NapCatAPI
             api = NapCatAPI()
             msg = self._compose_message("text", payload)
             r = api.call("send_msg", message_type="group", group_id=int(group_id) if group_id.isdigit() else group_id, message=msg)
@@ -1189,7 +1187,7 @@ class NapCatHandler(BaseHTTPRequestHandler):
             payload = params.get("_payload", "")
             if not group_id or not payload:
                 return {"error": "group_id and payload (file path) are required", "expected_schema": ACTION_SCHEMAS.get("send_group_image", {})}
-            from lib.api import NapCatAPI
+            from napcat_cli.lib.api import NapCatAPI
             api = NapCatAPI()
             try:
                 msg = self._compose_message("image", payload)
@@ -1213,7 +1211,7 @@ class NapCatHandler(BaseHTTPRequestHandler):
             payload = params.get("_payload", "")
             if not group_id or not payload:
                 return {"error": "group_id and payload (CQ code) are required", "expected_schema": ACTION_SCHEMAS.get("send_group_cqcode", {})}
-            from lib.api import NapCatAPI
+            from napcat_cli.lib.api import NapCatAPI
             api = NapCatAPI()
             msg = self._compose_message("cqcode", payload)
             r = api.call("send_msg", message_type="group", group_id=int(group_id) if group_id.isdigit() else group_id, message=msg)
@@ -1225,7 +1223,7 @@ class NapCatHandler(BaseHTTPRequestHandler):
             text = str(params.get("text", ""))
             if not group_id or not qq:
                 return {"error": "group_id and qq are required", "expected_schema": ACTION_SCHEMAS.get("send_group_at", {})}
-            from lib.api import NapCatAPI
+            from napcat_cli.lib.api import NapCatAPI
             api = NapCatAPI()
             msg = self._compose_message("at", None, qq=qq, text=text)
             r = api.call("send_msg", message_type="group", group_id=int(group_id) if group_id.isdigit() else group_id, message=msg)
@@ -1236,7 +1234,7 @@ class NapCatHandler(BaseHTTPRequestHandler):
             message = params.get("message", "")
             if not group_id or not message:
                 return {"error": "group_id and message are required", "expected_schema": ACTION_SCHEMAS.get("send_group_json", {})}
-            from lib.api import NapCatAPI
+            from napcat_cli.lib.api import NapCatAPI
             api = NapCatAPI()
             r = api.call("send_msg", message_type="group", group_id=int(group_id) if group_id.isdigit() else group_id, message=message)
             return self._format_send_result(r)
@@ -1247,7 +1245,7 @@ class NapCatHandler(BaseHTTPRequestHandler):
             payload = params.get("_payload", "")
             if not user_id or not payload:
                 return {"error": "user_id and payload are required", "expected_schema": ACTION_SCHEMAS.get("send_private_text", {})}
-            from lib.api import NapCatAPI
+            from napcat_cli.lib.api import NapCatAPI
             api = NapCatAPI()
             msg = self._compose_message("text", payload)
             r = api.call("send_msg", message_type="private", user_id=int(user_id) if user_id.isdigit() else user_id, message=msg)
@@ -1258,7 +1256,7 @@ class NapCatHandler(BaseHTTPRequestHandler):
             payload = params.get("_payload", "")
             if not user_id or not payload:
                 return {"error": "user_id and payload (file path) are required", "expected_schema": ACTION_SCHEMAS.get("send_private_image", {})}
-            from lib.api import NapCatAPI
+            from napcat_cli.lib.api import NapCatAPI
             api = NapCatAPI()
             try:
                 msg = self._compose_message("image", payload)
@@ -1282,7 +1280,7 @@ class NapCatHandler(BaseHTTPRequestHandler):
             payload = params.get("_payload", "")
             if not user_id or not payload:
                 return {"error": "user_id and payload (CQ code) are required", "expected_schema": ACTION_SCHEMAS.get("send_private_cqcode", {})}
-            from lib.api import NapCatAPI
+            from napcat_cli.lib.api import NapCatAPI
             api = NapCatAPI()
             msg = self._compose_message("cqcode", payload)
             r = api.call("send_msg", message_type="private", user_id=int(user_id) if user_id.isdigit() else user_id, message=msg)
@@ -1294,7 +1292,7 @@ class NapCatHandler(BaseHTTPRequestHandler):
             text = str(params.get("text", ""))
             if not user_id or not qq:
                 return {"error": "user_id and qq are required", "expected_schema": ACTION_SCHEMAS.get("send_private_at", {})}
-            from lib.api import NapCatAPI
+            from napcat_cli.lib.api import NapCatAPI
             api = NapCatAPI()
             msg = self._compose_message("at", None, qq=qq, text=text)
             r = api.call("send_msg", message_type="private", user_id=int(user_id) if user_id.isdigit() else user_id, message=msg)
@@ -1305,7 +1303,7 @@ class NapCatHandler(BaseHTTPRequestHandler):
             message = params.get("message", "")
             if not user_id or not message:
                 return {"error": "user_id and message are required", "expected_schema": ACTION_SCHEMAS.get("send_private_json", {})}
-            from lib.api import NapCatAPI
+            from napcat_cli.lib.api import NapCatAPI
             api = NapCatAPI()
             r = api.call("send_msg", message_type="private", user_id=int(user_id) if user_id.isdigit() else user_id, message=message)
             return self._format_send_result(r)
@@ -1317,7 +1315,7 @@ class NapCatHandler(BaseHTTPRequestHandler):
             payload = params.get("_payload", "")
             if not group_id or not message_id or not payload:
                 return {"error": "group_id, message_id, and payload are required", "expected_schema": ACTION_SCHEMAS.get("reply_group_text", {})}
-            from lib.api import NapCatAPI
+            from napcat_cli.lib.api import NapCatAPI
             api = NapCatAPI()
             base = self._compose_message("text", payload)
             msg = self._compose_reply(base, message_id)
@@ -1330,7 +1328,7 @@ class NapCatHandler(BaseHTTPRequestHandler):
             payload = params.get("_payload", "")
             if not group_id or not message_id or not payload:
                 return {"error": "group_id, message_id, and payload are required", "expected_schema": ACTION_SCHEMAS.get("reply_group_image", {})}
-            from lib.api import NapCatAPI
+            from napcat_cli.lib.api import NapCatAPI
             api = NapCatAPI()
             try:
                 base = self._compose_message("image", payload)
@@ -1356,7 +1354,7 @@ class NapCatHandler(BaseHTTPRequestHandler):
             payload = params.get("_payload", "")
             if not group_id or not message_id or not payload:
                 return {"error": "group_id, message_id, and payload are required", "expected_schema": ACTION_SCHEMAS.get("reply_group_cqcode", {})}
-            from lib.api import NapCatAPI
+            from napcat_cli.lib.api import NapCatAPI
             api = NapCatAPI()
             cq_str = self._compose_message("cqcode", payload)
             msg = [{"type": "reply", "data": {"id": str(message_id)}}, {"type": "text", "data": {"text": cq_str}}]
@@ -1370,7 +1368,7 @@ class NapCatHandler(BaseHTTPRequestHandler):
             text = str(params.get("text", ""))
             if not group_id or not message_id or not qq:
                 return {"error": "group_id, message_id, and qq are required", "expected_schema": ACTION_SCHEMAS.get("reply_group_at", {})}
-            from lib.api import NapCatAPI
+            from napcat_cli.lib.api import NapCatAPI
             api = NapCatAPI()
             base = self._compose_message("at", None, qq=qq, text=text)
             msg = self._compose_reply(base, message_id)
@@ -1383,7 +1381,7 @@ class NapCatHandler(BaseHTTPRequestHandler):
             message = params.get("message", "")
             if not group_id or not message_id or not message:
                 return {"error": "group_id, message_id, and message are required", "expected_schema": ACTION_SCHEMAS.get("reply_group_json", {})}
-            from lib.api import NapCatAPI
+            from napcat_cli.lib.api import NapCatAPI
             api = NapCatAPI()
             msg = [{"type": "reply", "data": {"id": str(message_id)}}] + message
             r = api.call("send_msg", message_type="group", group_id=int(group_id) if group_id.isdigit() else group_id, message=msg)
@@ -1396,7 +1394,7 @@ class NapCatHandler(BaseHTTPRequestHandler):
             payload = params.get("_payload", "")
             if not user_id or not message_id or not payload:
                 return {"error": "user_id, message_id, and payload are required", "expected_schema": ACTION_SCHEMAS.get("reply_private_text", {})}
-            from lib.api import NapCatAPI
+            from napcat_cli.lib.api import NapCatAPI
             api = NapCatAPI()
             base = self._compose_message("text", payload)
             msg = self._compose_reply(base, message_id)
@@ -1409,7 +1407,7 @@ class NapCatHandler(BaseHTTPRequestHandler):
             payload = params.get("_payload", "")
             if not user_id or not message_id or not payload:
                 return {"error": "user_id, message_id, and payload are required", "expected_schema": ACTION_SCHEMAS.get("reply_private_image", {})}
-            from lib.api import NapCatAPI
+            from napcat_cli.lib.api import NapCatAPI
             api = NapCatAPI()
             try:
                 base = self._compose_message("image", payload)
@@ -1435,7 +1433,7 @@ class NapCatHandler(BaseHTTPRequestHandler):
             payload = params.get("_payload", "")
             if not user_id or not message_id or not payload:
                 return {"error": "user_id, message_id, and payload are required", "expected_schema": ACTION_SCHEMAS.get("reply_private_cqcode", {})}
-            from lib.api import NapCatAPI
+            from napcat_cli.lib.api import NapCatAPI
             api = NapCatAPI()
             cq_str = self._compose_message("cqcode", payload)
             msg = [{"type": "reply", "data": {"id": str(message_id)}}, {"type": "text", "data": {"text": cq_str}}]
@@ -1449,7 +1447,7 @@ class NapCatHandler(BaseHTTPRequestHandler):
             text = str(params.get("text", ""))
             if not user_id or not message_id or not qq:
                 return {"error": "user_id, message_id, and qq are required", "expected_schema": ACTION_SCHEMAS.get("reply_private_at", {})}
-            from lib.api import NapCatAPI
+            from napcat_cli.lib.api import NapCatAPI
             api = NapCatAPI()
             base = self._compose_message("at", None, qq=qq, text=text)
             msg = self._compose_reply(base, message_id)
@@ -1462,7 +1460,7 @@ class NapCatHandler(BaseHTTPRequestHandler):
             message = params.get("message", "")
             if not user_id or not message_id or not message:
                 return {"error": "user_id, message_id, and message are required", "expected_schema": ACTION_SCHEMAS.get("reply_private_json", {})}
-            from lib.api import NapCatAPI
+            from napcat_cli.lib.api import NapCatAPI
             api = NapCatAPI()
             msg = [{"type": "reply", "data": {"id": str(message_id)}}] + message
             r = api.call("send_msg", message_type="private", user_id=int(user_id) if user_id.isdigit() else user_id, message=msg)
@@ -1611,7 +1609,7 @@ class NapCatHandler(BaseHTTPRequestHandler):
 
         # ---- napcat_delete_msg with recall rule hints ----
         if action == "napcat_delete_msg":
-            from lib.api import NapCatAPI
+            from napcat_cli.lib.api import NapCatAPI
             api = NapCatAPI()
             r = api.call("delete_msg", **params)
             if isinstance(r, dict) and "error" in r:
@@ -1619,7 +1617,7 @@ class NapCatHandler(BaseHTTPRequestHandler):
             return r
         # Proxy NapCat API calls through napcat_ prefix
         if action.startswith("napcat_"):
-            from lib.api import NapCatAPI
+            from napcat_cli.lib.api import NapCatAPI
             api = NapCatAPI()
             napcat_action = action.replace("napcat_", "", 1)
             return api.call(napcat_action, **params)
@@ -1640,7 +1638,7 @@ def run_http_server(
     NapCatHandler.cache = cache
     NapCatHandler.events_reader = EventsReader(cache.data_dir)
     NapCatHandler.skillsfs_manager = skillsfs_manager
-    HTTPServer.allow_reuse_address = True
+
     server = HTTPServer((host, port), NapCatHandler)
     t = threading.Thread(target=server.serve_forever, daemon=True)
     t.start()

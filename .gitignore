@@ -59,3 +59,7 @@ binding/python/__pycache__/
 
 # Local benchmark baselines (generated on demand)
 bench/baseline.txt
+# Python packaging
+dist/
+*.egg-info
+build/

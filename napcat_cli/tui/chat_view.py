@@ -12,7 +12,7 @@ from textual.reactive import reactive
 from rich.text import Text
 from textual.containers import Horizontal, Container
 from textual.binding import Binding
-from lib.message import format_message
+from napcat_cli.lib.message import format_message
 
 if TYPE_CHECKING:
     from .app import NapCatApp
@@ -278,7 +278,7 @@ class ChatViewScreen(Screen):
         self._loaded_message_ids.clear()
 
         try:
-            from lib.config import get_config
+            from napcat_cli.lib.config import get_config
             cfg = get_config()
             self_id = str(cfg.self_id or "")
         except Exception:
@@ -356,7 +356,7 @@ class ChatViewScreen(Screen):
             self._last_message_time = max(self._last_message_time, m.get("time", 0))
 
         try:
-            from lib.config import get_config
+            from napcat_cli.lib.config import get_config
             cfg = get_config()
             self_id = str(cfg.self_id or "")
         except Exception:

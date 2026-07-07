@@ -437,6 +437,33 @@
       "data": "# Friend Directory\n\nParameters:\n- user_id: QQ user ID\n\nSubdirectories are time ranges: recent, 1days, 7days, 30days, 90days.\nWrite to the `send` file to send a private message to this user.\n"
     },
     {
+      "path": "/napcat/send_forward",
+      "kind": "api",
+      "provider": "napcat",
+      "read": "forward_msg",
+      "write": "forward_msg",
+      "mode": "0644",
+      "writeParams": "json"
+    },
+    {
+      "path": "/napcat/send_poke",
+      "kind": "api",
+      "provider": "napcat",
+      "read": "send_poke",
+      "write": "send_poke",
+      "mode": "0644",
+      "writeParams": "json"
+    },
+    {
+      "path": "/napcat/create_schedule",
+      "kind": "api",
+      "provider": "napcat",
+      "read": "create_schedule",
+      "write": "create_schedule",
+      "mode": "0644",
+      "writeParams": "json"
+    },
+    {
       "path": "/napcat/friends/:user_id/:time_range/AGENTS.md",
       "kind": "blob",
       "mode": "0444",

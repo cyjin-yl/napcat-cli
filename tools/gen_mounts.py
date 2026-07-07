@@ -58,13 +58,23 @@ def make_blob(path, data, mode="0444"):
     }
 
 
+def make_dir(path, mode="0755"):
+    """Build a dir mount entry for intermediate directories.
+    Required because router.match() (used by Stat) requires n.mount != nil."""
+    return {
+        "path": path,
+        "kind": "dir",
+        "mode": mode,
+    }
+
+
 def make_dynamic_dir(path, read_action, provider="napcat"):
     """Build a dynamic_dir mount entry."""
     return {
         "path": path,
         "kind": "dynamic_dir",
-        "provider": provider,
         "read": read_action,
+        "provider": provider,
     }
 
 
@@ -72,9 +82,6 @@ def make_dynamic_dir(path, read_action, provider="napcat"):
 # Per-group operations (under groups/:group_id/)
 # ---------------------------------------------------------------------------
 GROUP_OPS = [
-    ("kick", "set_group_kick", "set_group_kick"),
-    ("ban", "set_group_ban", "set_group_ban"),
-    ("admin", "set_group_admin", "set_group_admin"),
     ("card", "set_group_card", "set_group_card"),
     ("name", "set_group_name", "set_group_name"),
     ("leave", "group_leave", "group_leave"),
@@ -221,6 +228,7 @@ def gen_mounts():
         if write_act:
             # Companion .schema blob
             mounts.append(make_blob(f"{path}.schema", schema_json(write_act)))
+
 
     # Per-group send directory (send/text, send/image, send/file, send/cqcode, send/at, send/json)
     for name, write_act, write_params in GROUP_SEND_OPS:
