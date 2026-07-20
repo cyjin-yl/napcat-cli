@@ -2,6 +2,8 @@
 
 Standalone CLI and daemon for NapCat QQ bot management with skills-fs integration.
 
+> 📝 **介绍博文：** [napcat-cli 群配置与管理速查](https://yvxi.pages.dev/blog/napcat-cli-group-config/) — 从零配置、群消息收发、Agent Wake 的完整链路。
+
 ---
 
 napcat-cli provides a CLI for all NapCat API operations, a WebSocket daemon
