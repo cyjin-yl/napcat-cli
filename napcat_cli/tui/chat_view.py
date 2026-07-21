@@ -198,13 +198,18 @@ class ChatViewScreen(Screen):
     }
     #input-bar {
         dock: bottom;
-        height: 2;
+        height: 3;
         border: solid $accent;
         background: $surface;
         padding: 0 1;
     }
+    #msg-input {
+        height: 1;
+        border: solid $accent;
+    }
     #send-btn {
-        width: 5;
+        width: 6;
+        height: 1;
     }
     """
 

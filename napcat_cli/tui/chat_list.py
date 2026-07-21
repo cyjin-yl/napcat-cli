@@ -33,9 +33,22 @@ class ChatListScreen(Screen):
     ListItem {
         height: 4;
         padding: 0 1;
+        color: $text;
+    }
+    ListItem .item-msg {
+        color: $text-muted;
     }
     ListItem:hover {
         background: $accent;
+        color: $text;
+    }
+    ListItem:hover .item-msg {
+        color: $text;
+    }
+    /* ListView selection highlight: keep text readable on the highlight bg */
+    ListItem.-highlight,
+    ListItem.-highlight .item-msg {
+        color: $text;
     }
     ListItem.-unread {
         background: $accent-lighten-2;
@@ -146,7 +159,7 @@ class ChatListScreen(Screen):
         msg = (chat.last_message or "")[:40]
         if msg:
             parts.append(msg)
-        msg_label = Label(" ".join(parts), markup=False)
+        msg_label = Label(" ".join(parts), markup=False, classes="item-msg")
         return name_label, msg_label
 
     def _app(self) -> "NapCatApp":
