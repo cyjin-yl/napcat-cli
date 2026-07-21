@@ -1918,14 +1918,12 @@ def run_daemon(config_path: str) -> None:
     token = cfg_data.get("token", os.environ.get("NAPCAT_TOKEN", ""))
 
     # --- Start skills-fs FUSE mount ---
+    # Treat empty strings as unset so an old config (which wrote "" for these)
+    # still falls back to the defaults instead of spawning with blank args.
     skills_fs_enabled = cfg_data.get("skills_fs_enabled", True)
-    skills_fs_mountpoint = cfg_data.get(
-        "skills_fs_mountpoint", _DEFAULT_MOUNTPOINT
-    )
-    skills_fs_binary = cfg_data.get("skills_fs_binary", "")
-    skills_fs_config = cfg_data.get(
-        "skills_fs_config", _DEFAULT_SKILLSFS_CONFIG
-    )
+    skills_fs_mountpoint = cfg_data.get("skills_fs_mountpoint") or _DEFAULT_MOUNTPOINT
+    skills_fs_binary = cfg_data.get("skills_fs_binary") or ""
+    skills_fs_config = cfg_data.get("skills_fs_config") or _DEFAULT_SKILLSFS_CONFIG
 
     skillsfs_mgr: SkillsFsManager | None = None
     if skills_fs_enabled:
