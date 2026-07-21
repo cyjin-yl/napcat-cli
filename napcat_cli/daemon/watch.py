@@ -21,12 +21,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import signal
 import sys
 import time
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
@@ -39,16 +41,43 @@ from napcat_cli.lib.config import DATA_DIR, get_config
 from napcat_cli.lib.events import EventsWriter, EventsReader
 
 from napcat_cli.daemon.schemas import ACTION_SCHEMAS
+from napcat_cli.wake_presets import build_waker
+from napcat_cli.wake_orchestrator import WakeOrchestrator
 
 
 # ---------------------------------------------------------------------------
 # Event Processor (alert generation)
 # ---------------------------------------------------------------------------
 
+def _make_rotating_logger(path: Path, max_bytes: int = 2_000_000, backup_count: int = 5) -> logging.Logger:
+    """A per-data-dir logger writing to ``path`` with size-based rotation.
+
+    Keeps daemon.log bounded: at ~2 MB it rolls to daemon.log.1 .. daemon.log.5
+    (olest deleted), so it can never fill the disk. Idempotent — re-creating it
+    for the same path does not stack duplicate handlers.
+    """
+    logger = logging.getLogger(f"napcat.daemon.{path.parent.name}")
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    if not any(getattr(h, "_napcat_marker", False) for h in logger.handlers):
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            h = RotatingFileHandler(path, maxBytes=max_bytes, backupCount=backup_count, encoding="utf-8")
+            h._napcat_marker = True  # type: ignore[attr-defined]
+            h.setFormatter(logging.Formatter("[%(asctime)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
+            logger.addHandler(h)
+        except Exception:
+            pass
+    return logger
+
+
 class EventProcessor:
     """Process events and generate alerts."""
 
-    def __init__(self, data_dir: Path, self_id: str = "", wake_command: str = "", wake_on_event: bool = True, *, group_trigger_word: str = "", private_trigger: str = ""):
+    def __init__(self, data_dir: Path, self_id: str = "", wake_command: str = "", wake_on_event: bool = True, *, group_trigger_word: str = "", private_trigger: str = "",
+                 waker=None, orchestrator=None,
+                 debounce_seconds: float = 3.0, cooldown_seconds: float = 30.0,
+                 new_message_idle_seconds: int = 600):
         self.writer = EventsWriter(data_dir)
         self.self_id = self_id
         self.wake_command = wake_command
@@ -56,12 +85,24 @@ class EventProcessor:
         self.group_trigger_word = group_trigger_word
         self.private_trigger = private_trigger
         self.log_file = data_dir / "daemon.log"
+        self._logger = _make_rotating_logger(self.log_file)
+        # Wake orchestrator (built by run_daemon from config). When present it
+        # owns debounce/cooldown/backlog + the Waker (http->cli auto-fallback).
+        # When absent, _wake falls back to the legacy wake_command shell string.
+        if orchestrator is not None:
+            self.orchestrator = orchestrator
+        elif waker is not None:
+            self.orchestrator = WakeOrchestrator(
+                waker, log=self.log,
+                debounce_seconds=debounce_seconds, cooldown_seconds=cooldown_seconds,
+                new_message_idle_seconds=new_message_idle_seconds,
+                legacy_command=wake_command)
+        else:
+            self.orchestrator = None
 
     def log(self, msg: str) -> None:
         try:
-            line = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}\n"
-            with open(self.log_file, "a") as f:
-                f.write(line)
+            self._logger.info(msg)
         except Exception:
             pass
 
@@ -97,6 +138,10 @@ class EventProcessor:
             "raw_message": str(raw_msg),
             "time": event.get("time", 0),
         })
+        # Track unread messages for the backlog sweep (NEW_MESSAGE itself does
+        # not wake; the sweep wakes the agent if they pile up unread).
+        if self.orchestrator is not None:
+            self.orchestrator.note_new_message(event.get("time") or time.time())
 
         if self.self_id:
             raw_str = str(raw_msg)
@@ -107,7 +152,7 @@ class EventProcessor:
                     "group_id": str(group_id) if group_id else "",
                     "message_id": msg_id,
                 })
-                self._wake("AT_ME")
+                self._wake("AT_ME", event)
 
             msg_segments = event.get("message", [])
             if isinstance(msg_segments, list):
@@ -127,7 +172,7 @@ class EventProcessor:
                                 "group_id": str(group_id) if group_id else "",
                                 "message_id": msg_id,
                             })
-                            self._wake("REPLY_TO_ME")
+                            self._wake("REPLY_TO_ME", event)
                             break
 
         # --- Trigger word detection on plain text (no CQ codes) ---
@@ -138,10 +183,10 @@ class EventProcessor:
             if isinstance(seg, dict) and seg.get("type") == "text"
         )
         if msg_type == "group" and self.group_trigger_word and self.group_trigger_word in plain_text:
-            self._wake("GROUP_TRIGGER")
+            self._wake("GROUP_TRIGGER", event)
         elif msg_type == "private":
             if self.private_trigger == "*" or (self.private_trigger and self.private_trigger in plain_text):
-                self._wake("PRIVATE_TRIGGER")
+                self._wake("PRIVATE_TRIGGER", event)
 
     def _handle_notice(self, event: dict) -> None:
         notice_type = event.get("notice_type", "")
@@ -208,7 +253,7 @@ class EventProcessor:
             })
             # Wake if bot was poked
             if self.self_id and target_id == self.self_id:
-                self._wake("NEW_POKE")
+                self._wake("NEW_POKE", event)
         elif sub_type == "lucky_king":
             self.writer.write_alert("NAPCAT_CLI_NEW_POKE", {
                 "summary": "Lucky king (red packet)",
@@ -226,7 +271,7 @@ class EventProcessor:
                 "times": times,
                 "sub_type": "profile_like",
             })
-            self._wake("PROFILE_LIKE")
+            self._wake("PROFILE_LIKE", event)
 
     # ---- group sub-handlers ----
 
@@ -244,7 +289,7 @@ class EventProcessor:
         })
         # Wake if bot's admin status changed
         if self.self_id and user_id == self.self_id:
-            self._wake("GROUP_ADMIN_CHANGE")
+            self._wake("GROUP_ADMIN_CHANGE", event)
 
     def _handle_group_ban(self, event: dict) -> None:
         sub = event.get("sub_type", "")
@@ -264,7 +309,7 @@ class EventProcessor:
         })
         # Wake if bot was banned
         if self.self_id and user_id == self.self_id and sub == "ban":
-            self._wake("BOT_BANNED")
+            self._wake("BOT_BANNED", event)
 
     def _handle_group_decrease(self, event: dict, sub_type: str) -> None:
         user_id = str(event.get("user_id", ""))
@@ -280,9 +325,9 @@ class EventProcessor:
         })
         # Wake if bot was kicked
         if sub_type == "kick_me" and self.self_id:
-            self._wake("BOT_KICKED_FROM_GROUP")
+            self._wake("BOT_KICKED_FROM_GROUP", event)
         elif sub_type == "disband":
-            self._wake("GROUP_DISBANDED")
+            self._wake("GROUP_DISBANDED", event)
 
     def _handle_group_increase(self, event: dict, sub_type: str) -> None:
         user_id = str(event.get("user_id", ""))
@@ -296,7 +341,7 @@ class EventProcessor:
             "group_id": group_id,
             "operator_id": operator_id,
         })
-        self._wake("NEW_GROUP_MEMBER")
+        self._wake("NEW_GROUP_MEMBER", event)
 
     def _handle_group_upload(self, event: dict) -> None:
         file_info = event.get("file", {})
@@ -325,7 +370,7 @@ class EventProcessor:
         })
         # Wake if bot's own message was recalled
         if self.self_id and user_id == self.self_id:
-            self._wake("MY_MESSAGE_RECALLED")
+            self._wake("MY_MESSAGE_RECALLED", event)
 
     def _handle_group_card(self, event: dict) -> None:
         user_id = str(event.get("user_id", ""))
@@ -368,7 +413,7 @@ class EventProcessor:
             "notice_type": "friend_add",
             "user_id": user_id,
         })
-        self._wake("NEW_FRIEND")
+        self._wake("NEW_FRIEND", event)
 
     def _handle_friend_recall(self, event: dict) -> None:
         user_id = str(event.get("user_id", ""))
@@ -398,7 +443,7 @@ class EventProcessor:
             alert_data["group_id"] = str(event.get("group_id", ""))
             alert_data["summary"] = f"{req_type} {sub_type} request from {user_id} to group {event.get('group_id', '?')}: {comment[:30]}"
         self.writer.write_alert("NAPCAT_CLI_NEW_REQUEST", alert_data)
-        self._wake("NEW_REQUEST")
+        self._wake("NEW_REQUEST", event)
 
     def _handle_meta(self, event: dict) -> None:
         sub_type = event.get("sub_type", "")
@@ -411,22 +456,50 @@ class EventProcessor:
                     "meta_type": "lifespan",
                     "status": status,
                 })
-                self._wake("BOT_OFFLINE")
+                self._wake("BOT_OFFLINE", event)
         elif sub_type == "heartbeat":
             interval = event.get("interval", 0)
             self.log(f"Heartbeat ({interval}s)")
 
-    def _wake(self, reason: str) -> None:
+    @staticmethod
+    def _event_brief(event: dict | None) -> str:
+        """One-line, grep-friendly summary of the triggering event for logs."""
+        if not event:
+            return "(no event)"
+        sender = event.get("sender") if isinstance(event.get("sender"), dict) else {}
+        who = sender.get("nickname") or event.get("user_id") or "?"
+        g = event.get("group_id")
+        where = f"group{g}" if g else "dm"
+        msg = event.get("message") if event.get("message") is not None else event.get("raw_message", "")
+        if isinstance(msg, list):
+            text = "".join(
+                (s.get("data") or {}).get("text", "")
+                for s in msg if isinstance(s, dict) and s.get("type") == "text"
+            )
+        else:
+            text = str(msg)
+        return f"who={who} where={where} text={text[:40]!r}"
+
+    def _wake(self, reason: str, event: dict | None = None) -> None:
         if not self.wake_on_event:
+            self.log(f"[WAKE] disabled, skip reason={reason}")
             return
 
+        self.log(f"[WAKE] trigger reason={reason} {self._event_brief(event)}")
         self.writer.write_alert("NAPCAT_CLI_NEED_WAKE_UP", {
             "summary": f"Wake up needed: {reason}",
             "reason": reason,
             "timestamp": int(time.time()),
         })
 
-        # Execute wake_command if configured
+        # Preferred path: hand to the orchestrator (debounce/cooldown/backlog +
+        # Waker with http->cli auto-fallback; also owns the legacy_command escape
+        # hatch when no backend is configured).
+        if self.orchestrator is not None:
+            self.orchestrator.submit(reason, event)
+            return
+
+        # Legacy path: run wake_command as a shell string (back-compat).
         if self.wake_command:
             self.log(f"Executing wake command: {self.wake_command}")
             try:
@@ -1702,17 +1775,49 @@ async def health_check_task(processor: EventProcessor, api_url: str, token: str,
         await asyncio.sleep(interval)
 
 
+async def backlog_sweep_task(processor: "EventProcessor", interval: int = 45) -> None:
+    """Periodically nudge the agent to read unread messages that piled up.
+
+    NEW_MESSAGE events are tracked (not woken) by the orchestrator; if they sit
+    unread longer than ``new_message_idle_seconds`` this fires a single
+    ``NEW_MESSAGE_BACKLOG`` wake so the agent scans the inbox.
+    """
+    await asyncio.sleep(interval)  # let the daemon warm up first
+    while True:
+        try:
+            if processor.orchestrator is not None:
+                processor.orchestrator.maybe_backlog_sweep()
+        except Exception as e:
+            processor.log(f"backlog sweep error: {e}")
+        await asyncio.sleep(interval)
+
+
 def run_daemon(config_path: str) -> None:
     """Start the WebSocket daemon with HTTP provider."""
     cfg_data = json.loads(Path(config_path).read_text())
     self_id = cfg_data.get("self_id", "")
     wake_command = cfg_data.get("wake_command", "")
-    wake_on_event = cfg_data.get("wake_on_event", True)
+    wake_on_event = bool(cfg_data.get("wake_enabled", cfg_data.get("wake_on_event", True)))
     group_trigger = cfg_data.get("group_trigger_word", "")
     private_trigger = cfg_data.get("private_trigger", "")
+
+    # Build the wake Waker (http->cli auto-fallback) from the wake_* config.
+    from napcat_cli.lib.config import NapCatConfig
+    wake_cfg = NapCatConfig()
+    for _k in ("wake_preset", "wake_primary", "wake_session", "wake_http_url",
+               "wake_http_key", "wake_http_session_id", "wake_cli_command"):
+        if _k in cfg_data:
+            setattr(wake_cfg, _k, cfg_data[_k])
+    waker = build_waker(wake_cfg)
+    debounce = float(cfg_data.get("wake_debounce_seconds", 3.0))
+    cooldown = float(cfg_data.get("wake_cooldown_seconds", 30.0))
+    nm_idle = int(cfg_data.get("wake_new_message_idle_seconds", 600))
+
     processor = EventProcessor(DATA_DIR, self_id, wake_command, wake_on_event,
         group_trigger_word=group_trigger,
         private_trigger=private_trigger,
+        waker=waker, debounce_seconds=debounce, cooldown_seconds=cooldown,
+        new_message_idle_seconds=nm_idle,
     )
     cache = EventCache(DATA_DIR)
 
@@ -1776,6 +1881,8 @@ def run_daemon(config_path: str) -> None:
     ]
     if skillsfs_mgr is not None:
         tasks.append(loop.create_task(skillsfs_monitor_task(skillsfs_mgr)))
+    if processor.orchestrator is not None:
+        tasks.append(loop.create_task(backlog_sweep_task(processor)))
 
     # Wait for either to finish (shutdown or WS crash)
     done, _ = loop.run_until_complete(asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED))

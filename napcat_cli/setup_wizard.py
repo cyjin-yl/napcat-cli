@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import os
-import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -11,12 +10,6 @@ from typing import Any
 
 from napcat_cli.lib.config import NapCatConfig, DATA_DIR
 from napcat_cli.lib.api import NapCatAPI
-
-
-_DEFAULT_HERMES_PROMPT = (
-    "收到新的 QQ 消息。请使用 napcat-cli 查看当前未处理收件箱，"
-    "结合已有上下文决定是否需要回复，并发送回复。"
-)
 
 
 def _write_daemon_json(cfg: NapCatConfig, data_dir: str | Path) -> None:
@@ -33,6 +26,16 @@ def _write_daemon_json(cfg: NapCatConfig, data_dir: str | Path) -> None:
         "skills_fs_mountpoint": cfg.skills_fs_mountpoint,
         "skills_fs_binary": cfg.skills_fs_binary,
         "skills_fs_config": cfg.skills_fs_config,
+        "wake_enabled": cfg.wake_enabled,
+        "wake_preset": cfg.wake_preset,
+        "wake_primary": cfg.wake_primary,
+        "wake_session": cfg.wake_session,
+        "wake_http_url": cfg.wake_http_url,
+        "wake_http_session_id": cfg.wake_http_session_id,
+        "wake_cli_command": cfg.wake_cli_command,
+        "wake_debounce_seconds": cfg.wake_debounce_seconds,
+        "wake_cooldown_seconds": cfg.wake_cooldown_seconds,
+        "wake_new_message_idle_seconds": cfg.wake_new_message_idle_seconds,
     }
     daemon_path = Path(data_dir) / "daemon.json"
     daemon_path.write_text(json.dumps(cfg_dict, indent=2))
@@ -136,6 +139,41 @@ def _install_hermes_skill(cfg: NapCatConfig, force: bool = False) -> None:
     (hermes_dir / "SKILL.md").write_text(skill_md)
     (hermes_dir / "persona.md").write_text(persona_md)
     print(f"  Hermes skill installed at {hermes_dir}")
+
+
+HERMES_GATEWAY_UNIT = "hermes-gateway.service"
+
+
+def _enable_hermes_api_server(cfg: NapCatConfig) -> bool:
+    """Opt-in: enable the Hermes API server and restart the gateway.
+
+    Appends ``API_SERVER_ENABLED=true`` + a generated key to ``~/.hermes/.env``
+    (append-only, never rewrites), restarts the systemd unit (passwordless sudo),
+    and wires ``cfg.wake_http_url`` / ``cfg.wake_http_key``. Returns True on success.
+    """
+    import secrets as _secrets
+    import subprocess
+    hermes_env = Path.home() / ".hermes" / ".env"
+    key = _secrets.token_hex(32)
+    try:
+        with open(hermes_env, "a") as f:
+            f.write("\n# Added by napcat-cli setup (agent wake)\n")
+            f.write("API_SERVER_ENABLED=true\n")
+            f.write(f"API_SERVER_KEY={key}\n")
+    except Exception as e:
+        print(f"  Could not write {hermes_env}: {e}", file=sys.stderr)
+        return False
+    print(f"  Appended API_SERVER_ENABLED=true + key to {hermes_env}")
+    try:
+        subprocess.run(["sudo", "-n", "systemctl", "restart", HERMES_GATEWAY_UNIT],
+                       check=True, timeout=60)
+        print(f"  Restarted {HERMES_GATEWAY_UNIT}")
+    except Exception as e:
+        print(f"  WARNING: could not restart {HERMES_GATEWAY_UNIT}: {e}", file=sys.stderr)
+        print(f"  Restart manually: sudo systemctl restart {HERMES_GATEWAY_UNIT}", file=sys.stderr)
+    cfg.wake_http_url = "http://127.0.0.1:8642"
+    cfg.wake_http_key = key
+    return True
 
 
 def _check_cli_symlink(yes: bool = False) -> None:
@@ -242,42 +280,53 @@ def run_setup(non_interactive: bool = False, yes: bool = False, force: bool = Fa
 
     # --- 4. Wake agent preset ---
     print("[4] Wake agent configuration")
+    print("  Wake is pluggable: Hermes is the default preset, but any HTTP endpoint or")
+    print("  shell command works. Default transport = CLI one-shot (zero infra); HTTP is opt-in.")
     if non_interactive:
         preset = "hermes"
     else:
-        print("  Choose wake agent: [H]ermes / [C]ustom / [N]one", file=sys.stderr)
+        print("  Choose wake agent: [H]ermes (default) / [C]ustom / [N]one", file=sys.stderr)
         try:
             choice = input("  > ").lower().strip()
         except (EOFError, KeyboardInterrupt):
             print(file=sys.stderr)
             choice = "h"
-        if choice in ("h", "hermes"):
-            preset = "hermes"
-        elif choice in ("c", "custom"):
-            preset = "custom"
-        else:
-            preset = "none"
+        preset = "custom" if choice in ("c", "custom") else "none" if choice in ("n", "none") else "hermes"
+
+    cfg.wake_enabled = preset != "none"
+    cfg.wake_preset = preset
+    cfg.wake_primary = "auto"
 
     if preset == "hermes":
-        if non_interactive:
-            session = "napcat-qq"
-            prompt = _DEFAULT_HERMES_PROMPT
-        else:
-            session = _prompt_str("Hermes session", "napcat-qq")
-            prompt = _prompt_str("Wake prompt", _DEFAULT_HERMES_PROMPT)
-        cfg.wake_command = (
-            f"hermes -c {shlex.quote(session)} "
-            f"-z {shlex.quote(prompt)} "
-            f"-s napcat-cli --yolo"
-        )
+        session = "napcat-qq" if non_interactive else _prompt_str("Agent session name", "napcat-qq")
+        cfg.wake_session = session
+        cfg.wake_cli_command = ""  # hermes preset fills the default CLI command at wake time
+        cfg.wake_command = ""      # clear any legacy (broken) wake command
         cfg.wake_on_event = True
-        print(f"  wake_command = {cfg.wake_command[:80]}...")
-    elif preset == "custom":
-        if non_interactive:
-            cfg.wake_command = ""
+        print(f"  preset=hermes session={session} primary=auto (CLI one-shot by default)")
+        enable_http = False
+        if not non_interactive:
+            print(f"  Enable the Hermes HTTP API server now? Appends to ~/.hermes/.env and runs\n"
+                  f"    sudo systemctl restart {HERMES_GATEWAY_UNIT}\n"
+                  f"  (briefly interrupts your messaging platforms). [y/N]", file=sys.stderr)
+            try:
+                enable_http = input("  > ").lower().strip() in ("y", "yes")
+            except (EOFError, KeyboardInterrupt):
+                print(file=sys.stderr)
+        if enable_http:
+            _enable_hermes_api_server(cfg)
         else:
-            cfg.wake_command = _prompt_str("Custom wake command", "")
-        cfg.wake_on_event = bool(cfg.wake_command)
+            print("  HTTP API server not enabled — CLI one-shot transport will be used.\n"
+                  "  (Re-run setup or set wake_http_* later to switch to HTTP.)")
+    elif preset == "custom":
+        cfg.wake_session = "napcat-qq" if non_interactive else _prompt_str("Session name", "napcat-qq")
+        if not non_interactive:
+            cfg.wake_http_url = _prompt_str("HTTP base URL (blank = skip http)", "")
+            if cfg.wake_http_url:
+                cfg.wake_http_key = _prompt_str("HTTP bearer key", "")
+            cfg.wake_cli_command = _prompt_str("CLI command template (blank = skip cli)", "")
+        cfg.wake_command = ""
+        cfg.wake_on_event = True
     else:
         cfg.wake_command = ""
         cfg.wake_on_event = False

@@ -39,7 +39,7 @@ napcat wake --reason NEW_MESSAGE
 | `napcat config get/set` | Configuration management |
 | `napcat daemon start/stop/status/restart` | Watch daemon |
 | `napcat fs tree` | Skills-fs directory tree |
-| `napcat wake [--reason R] [--dry-run]` | Trigger agent wake |
+| `napcat wake [--reason R] [--prompt P] [--transport T] [--dry-run]` | Wake the configured agent (HTTP/CLI, auto-fallback) |
 | `napcat setup` | Interactive setup wizard |
 | `napcat phone` | Textual phone-style TUI |
 
@@ -70,28 +70,80 @@ napcat setup --force            # overwrite existing config
 
 ## Agent Wake
 
-Events can trigger a wake command that runs a shell command (e.g. `hermes -z`).
+When a notable QQ event arrives, the daemon wakes an external agent (Hermes by
+default) carrying a **contextual prompt** so it can read the inbox and reply.
+The wake mechanism is **generic and pluggable** — Hermes is just the default
+preset; any HTTP endpoint or shell command works.
 
-Configure via:
+### Two transports, auto-fallback
+
+| Transport | When it's used | Needs |
+|-----------|----------------|-------|
+| **CLI one-shot** (default) | Always available | `hermes` on PATH |
+| **HTTP API server** | Opt-in (best latency, idempotent, in-session) | `wake_http_url` + `wake_http_key` |
+
+`wake_primary=auto` tries HTTP first (if configured + reachable), else falls back
+to the CLI one-shot. The Hermes CLI backend runs
+`hermes --continue <session> -z "<prompt>" --yolo --pass-session-id`; the HTTP
+backend POSTs to `POST /api/sessions/{id}/chat` (verified per the Hermes API
+docs), with `Authorization: Bearer <key>` and an `Idempotency-Key` header.
+
+### Event routing
+
+| Trigger | Behavior |
+|---------|----------|
+| `AT_ME`, `REPLY_TO_ME` | Near-immediate wake (cooldown bypassed), with who/where/text in the prompt |
+| `GROUP_TRIGGER`, `PRIVATE_TRIGGER` | Debounced wake |
+| `NEW_MESSAGE` (not @) | Tracked, not woken; if unread longer than `wake_new_message_idle_seconds` → a `NEW_MESSAGE_BACKLOG` wake |
+| `NEW_FRIEND`, `NEW_REQUEST`, `BOT_BANNED`, `NEW_POKE`, `GROUP_ADMIN_CHANGE`, `NEW_GROUP_MEMBER`, `BOT_OFFLINE`, … | Debounced + cooldown-bounded wake so the agent perceives them within a reasonable window |
+
+Debounce (`wake_debounce_seconds`, default 3) coalesces a burst into one wake;
+cooldown (`wake_cooldown_seconds`, default 30) suppresses repeats. Every wake is
+logged to `daemon.log` as `[WAKE] trigger / queued / deliver / reply` lines
+(including transport, elapsed time, and the agent's reply), and `daemon.log` is
+size-rotated (2 MB × 5) so it can't fill the disk.
+
+### Configure
+
+The easiest path is the wizard:
 
 ```bash
-napcat config set wake_on_event true
-napcat config set wake_command 'hermes -c session -z "new QQ message" -s napcat-cli --yolo'
+napcat setup        # choose Hermes preset; CLI one-shot by default, HTTP opt-in
 ```
 
-The `$REASON`, `${REASON}`, and `{reason}` placeholders in `wake_command` are
-replaced with the event reason (e.g. `AT_ME`, `NEW_MESSAGE`).
-
-Supported triggers: `AT_ME`, `REPLY_TO_ME`, `GROUP_TRIGGER`, `PRIVATE_TRIGGER`,
-`NEW_POKE`, `NEW_FRIEND_REQUEST`, `NEW_GROUP_REQUEST`, `NEW_MESSAGE`.
-
-Manual trigger:
+Or set keys directly:
 
 ```bash
-napcat wake                        # reason: manual
-napcat wake --reason NEW_MESSAGE   # custom reason
-napcat wake --dry-run              # print command without executing
+napcat config set wake_enabled true
+napcat config set wake_preset hermes        # hermes | custom | none
+napcat config set wake_session napcat-qq
+napcat config set wake_primary auto         # auto | http | cli
+# HTTP (optional). Key also readable from NAPCAT_WAKE_HTTP_KEY / HERMES_API_KEY:
+napcat config set wake_http_url http://127.0.0.1:8642
+napcat config set wake_http_key <API_SERVER_KEY>
+napcat config set wake_new_message_idle_seconds 600
 ```
+
+To enable the Hermes HTTP API server (appends to `~/.hermes/.env` and restarts
+the `hermes-gateway.service` systemd unit), answer "y" during `napcat setup`, or
+set `API_SERVER_ENABLED=true` + `API_SERVER_KEY` in `~/.hermes/.env` yourself and
+`sudo systemctl restart hermes-gateway.service`.
+
+### Manual / debug
+
+```bash
+napcat wake                           # reason: manual, contextual default prompt
+napcat wake --reason AT_ME --prompt "hello"
+napcat wake --transport cli           # force a transport for this wake
+napcat wake --dry-run                 # render the HTTP request + CLI command without executing
+napcat wake test                      # per-transport configured + reachable probe
+napcat wake sessions                  # list Hermes sessions (HTTP backend)
+grep '\[WAKE\]' ~/.napcat-data/daemon.log    # see when/why/how wakes fired
+```
+
+The agent replies via `napcat send` / `napcat reply` (or the skills-fs write
+path) — see `napcat_cli/data/SKILL.md`. Legacy `wake_command` shell strings still
+run as a last-resort escape hatch when no backend is configured.
 
 ---
 
@@ -128,7 +180,10 @@ skills-fs fuse --config ~/.napcat-data/skills-fs.json \
 napcat-cli/
 ├── napcat_cli/          # Installable package
 │   ├── cli.py           # CLI entry point
-│   ├── wake.py          # Wake command builder
+│   ├── wake.py          # Wake command-template renderer
+│   ├── wake_backend.py  # Generic HTTP/CLI wake transports + Waker (auto-fallback)
+│   ├── wake_presets.py  # Hermes/custom/none presets -> Waker
+│   ├── wake_orchestrator.py  # Debounce, cooldown, backlog sweep, contextual prompts
 │   ├── setup_wizard.py  # Setup wizard
 │   ├── daemon/          # Watch daemon, schemas
 │   ├── lib/             # API, config, events

@@ -145,8 +145,9 @@ napcat daemon status
 | `napcat setup` | Interactive wizard: configure NapCat connection, skills-fs, and wake agent |
 | `napcat setup --non-interactive` | Non-interactive setup with all defaults (useful in scripts) |
 | `napcat setup --yes` | Auto-accept all prompts without confirmation |
-| `napcat wake [reason]` | Trigger the configured wake_command (e.g. wake Hermes) |
-| `napcat wake --dry-run` | Print the rendered wake command without executing it |
+| `napcat wake [--reason R] [--prompt P] [--transport T]` | Wake the agent (HTTP/CLI, auto-fallback); daemon also calls it automatically on events |
+| `napcat wake test` / `napcat wake sessions` | Probe transports / list Hermes sessions |
+| `napcat wake --dry-run` | Render the HTTP request + CLI command without executing |
 | `napcat config get <key>` | Read a config key (api_url, token, wake_command, etc.) |
 | `napcat config set <key> <value>` | Set a config key |
 
@@ -156,21 +157,48 @@ Runs an interactive wizard that configures:
 1. **NapCat connection** — API URL (default `http://127.0.0.1:18801`) and token (validated against the running instance).
 2. **Data directory** — default `~/.napcat-data`.
 3. **skills-fs** — mountpoint, config path, binary detection. Guides you to build or download the Go binary if missing.
-4. **Wake agent** — choose `hermes` (default), `custom`, or `none`. For Hermes, sets `hermes -c <session> -z '<prompt>' -s napcat-cli --yolo` as the wake command.
+4. **Wake agent** — choose `hermes` (default), `custom`, or `none`. Hermes uses the CLI one-shot transport (`hermes --continue <session> -z …`) by default; the HTTP API server is opt-in. Wake is pluggable — any HTTP endpoint or shell command works.
 5. **Install skill** — copies this SKILL.md into `~/.hermes/skills/napcat-cli/` for Hermes to discover.
 
 Use `--non-interactive` to skip all prompts (uses defaults). Use `--yes` to auto-confirm actions.
 
-## Wake Command (`napcat wake`)
+## Agent Wake (`napcat wake`)
 
-Triggers the configured `wake_command` from `~/.napcat-data/config.json`. Typical use: wake Hermes to process new QQ messages.
+The daemon wakes you (the agent) automatically when notable QQ events arrive —
+you don't usually call this yourself. Each wake carries a **contextual prompt**
+that already tells you *what* happened (who @'d you, in which group, the message
+text, counts), so read the prompt before re-querying.
 
-- `napcat wake` — triggers with reason `"MANUAL"`.
-- `napcat wake "NEW_MESSAGE"` — passes a specific reason into the template (`$REASON`, `${REASON}`, or `{reason}`).
-- `napcat wake --dry-run` — prints the rendered command without executing (useful for debugging).
-- If no `wake_command` is configured, the command fails with a suggestion to run `napcat setup`.
+- `AT_ME` / `REPLY_TO_ME` wake you near-immediately and bypass cooldown — these
+  expect a prompt reply. Use `napcat reply <id>` or `napcat send`.
+- `NEW_MESSAGE_BACKLOG` means unread messages piled up — scan `napcat events` /
+  `napcat alerts` and reply to anything worth replying to.
+- Other events (`NEW_FRIEND`, `NEW_REQUEST`, `BOT_BANNED`, `NEW_POKE`, …) are
+  debounced; you'll perceive them within a reasonable window.
 
-The daemon also calls `napcat wake` automatically when `wake_on_event` is enabled and new events arrive.
+Wake is **pluggable** (HTTP API server or CLI one-shot, auto-fallback); Hermes is
+the default preset but not required. Manual / debug:
+
+```bash
+napcat wake                            # manual wake, contextual default prompt
+napcat wake --reason AT_ME --prompt "…"
+napcat wake --dry-run                  # render HTTP request + CLI command
+napcat wake test                       # per-transport reachability
+napcat wake sessions                   # list Hermes sessions (HTTP backend)
+grep '\[WAKE\]' ~/.napcat-data/daemon.log   # when/why/how wakes fired + your replies
+```
+
+### Proactive speaking (replying to QQ)
+
+When a wake tells you to act, reply using the CLI (no FUSE mount needed):
+
+```bash
+napcat reply <message_id> -m "回复内容"             # quote-reply in the same chat
+napcat send group <group_id> -m "…" --at <user_id>  # @ someone in a group
+napcat send private <user_id> -m "…"
+```
+
+Load `~/.napcat-data/skills/persona.md` first to reply in persona on QQ.
 
 ## Config Command (`napcat config`)
 

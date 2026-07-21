@@ -34,8 +34,22 @@ class NapCatConfig:
     webhook_port: int = 18820
     ws_port: int = 18800
     http_port: int = 18821
-    wake_on_event: bool = True
-    wake_command: str = ""
+    wake_on_event: bool = True          # deprecated alias of wake_enabled (back-compat)
+    wake_command: str = ""              # legacy shell escape hatch (used only if no backend configured)
+
+    # --- generic, pluggable agent wake (Hermes is the default preset, not required) ---
+    wake_enabled: bool = True
+    wake_preset: str = "hermes"         # hermes | custom | none
+    wake_primary: str = "auto"          # auto | http | cli   (auto = http if configured+reachable, else cli)
+    wake_session: str = "napcat-qq"     # session name (cli --continue / http session lookup)
+    wake_http_url: str = ""             # e.g. http://127.0.0.1:8642  (hermes preset default)
+    wake_http_key: str = ""             # bearer token (env: NAPCAT_WAKE_HTTP_KEY)
+    wake_http_session_id: str = ""      # explicit session id; else resolved by name via GET /api/sessions
+    wake_cli_command: str = ""          # rendered template; hermes preset fills it
+    wake_debounce_seconds: float = 3.0
+    wake_cooldown_seconds: float = 30.0
+    wake_new_message_idle_seconds: int = 600
+
     event_dir: str = "events"
     alert_dir: str = "alerts"
     log_file: str = "daemon.log"

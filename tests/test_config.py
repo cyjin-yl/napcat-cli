@@ -40,7 +40,7 @@ class TestNapCatConfig:
 
 
 class TestWriteDaemonJson:
-    def test_emits_all_11_keys(self, tmp_path):
+    def test_emits_all_keys(self, tmp_path):
         os.environ["NAPCAT_DATA_DIR"] = str(tmp_path)
         cfg = NapCatConfig()
         cfg.skills_fs_mountpoint = "/test/mount"
@@ -60,6 +60,10 @@ class TestWriteDaemonJson:
             "group_trigger_word", "private_trigger",
             "skills_fs_enabled", "skills_fs_mountpoint",
             "skills_fs_binary", "skills_fs_config",
+            "wake_enabled", "wake_preset", "wake_primary", "wake_session",
+            "wake_http_url", "wake_http_session_id", "wake_cli_command",
+            "wake_debounce_seconds", "wake_cooldown_seconds",
+            "wake_new_message_idle_seconds",
         }
         assert set(data.keys()) == expected_keys
         assert data["skills_fs_mountpoint"] == "/test/mount"

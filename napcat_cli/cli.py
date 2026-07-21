@@ -44,6 +44,17 @@ def require_online(api: NapCatAPI) -> bool:
         return False
     return True
 
+
+def _normalize_file_path(path: str) -> str:
+    """Convert local file path to file:// URL if needed."""
+    if path.startswith(("http://", "https://", "file://", "base64://")):
+        return path
+    p = Path(path)
+    if p.exists():
+        return "file://" + str(p.resolve())
+    print(f"Error: file not found: {path}", file=sys.stderr)
+    return path
+
 def cmd_api(args: argparse.Namespace, api: NapCatAPI) -> int:
     """napcat api - Raw API access like 'gh api'."""
     endpoint = args.endpoint
@@ -120,7 +131,6 @@ def cmd_send(args: argparse.Namespace, api: NapCatAPI) -> int:
     # message is now required positional arg
     segments.append({"type": "text", "data": {"text": message_text}})
 
-    kwargs: dict = {"message_type": msg_type, "message": segments}
     kwargs: dict = {"message_type": msg_type, "message": segments}
     if msg_type == "group":
         kwargs["group_id"] = target_id
@@ -320,20 +330,22 @@ def cmd_file(args: argparse.Namespace, api: NapCatAPI) -> int:
     sub = args.subcommand
 
     if sub == "upload-group":
-        kwargs: dict = {"group_id": args.group_id, "file": args.file, "name": args.name or Path(args.file).name}
+        file_path = _normalize_file_path(args.file)
+        kwargs: dict = {"group_id": args.group_id, "file": file_path, "name": args.name or Path(args.file).name}
         if args.folder:
             kwargs["folder"] = args.folder
         result = api.call("upload_group_file", **kwargs)
     elif sub == "upload-private":
-        result = api.call("upload_private_file", user_id=args.user_id, file=args.file, name=args.name or Path(args.file).name)
+        file_path = _normalize_file_path(args.file)
+        result = api.call("upload_private_file", user_id=args.user_id, file=file_path, name=args.name or Path(args.file).name)
     elif sub == "list-group":
         result = api.call("get_group_root_files", group_id=args.group_id)
     elif sub == "list-folder":
         result = api.call("get_group_files_by_folder", group_id=args.group_id, folder_id=args.folder_id)
     elif sub == "info":
-        result = api.call("get_file", file_id=args.file_id)
+        result = api.call("get_file", group_id=args.group_id, file_id=args.file_id)
     elif sub == "download":
-        result = api.call("get_file", file_id=args.file_id)
+        result = api.call("get_file", group_id=args.group_id, file_id=args.file_id)
         if result.get("retcode") == 0:
             local_path = result["data"]["file"]
             print(f"File available at: {local_path}", file=sys.stderr)
@@ -381,6 +393,16 @@ def cmd_daemon(args: argparse.Namespace, api: NapCatAPI) -> int:
             "skills_fs_mountpoint": cfg.skills_fs_mountpoint,
             "skills_fs_binary": cfg.skills_fs_binary,
             "skills_fs_config": cfg.skills_fs_config,
+            "wake_enabled": cfg.wake_enabled,
+            "wake_preset": cfg.wake_preset,
+            "wake_primary": cfg.wake_primary,
+            "wake_session": cfg.wake_session,
+            "wake_http_url": cfg.wake_http_url,
+            "wake_http_session_id": cfg.wake_http_session_id,
+            "wake_cli_command": cfg.wake_cli_command,
+            "wake_debounce_seconds": cfg.wake_debounce_seconds,
+            "wake_cooldown_seconds": cfg.wake_cooldown_seconds,
+            "wake_new_message_idle_seconds": cfg.wake_new_message_idle_seconds,
         }
         cfg_path.write_text(json.dumps(cfg_dict, indent=2))
 
@@ -556,6 +578,17 @@ def cmd_config(args: argparse.Namespace, api: NapCatAPI) -> int:
             ("http_port", cfg.http_port),
             ("wake_on_event", cfg.wake_on_event),
             ("wake_command", cfg.wake_command),
+            ("wake_enabled", cfg.wake_enabled),
+            ("wake_preset", cfg.wake_preset),
+            ("wake_primary", cfg.wake_primary),
+            ("wake_session", cfg.wake_session),
+            ("wake_http_url", cfg.wake_http_url),
+            ("wake_http_key", "(set)" if cfg.wake_http_key else ""),
+            ("wake_http_session_id", cfg.wake_http_session_id),
+            ("wake_cli_command", cfg.wake_cli_command),
+            ("wake_debounce_seconds", cfg.wake_debounce_seconds),
+            ("wake_cooldown_seconds", cfg.wake_cooldown_seconds),
+            ("wake_new_message_idle_seconds", cfg.wake_new_message_idle_seconds),
         ]
         for key, val in items:
             print(f"{key}: {val}")
@@ -656,19 +689,13 @@ def cmd_like(args: argparse.Namespace, api: NapCatAPI) -> int:
 
 
 def cmd_send_forward(args: argparse.Namespace, api: NapCatAPI) -> int:
-    """napcat send_forward - Forward a message."""
+    """napcat send_forward - Forward a message to a group."""
+    if api.is_api_supported("napcat_forward_msg") is False:
+        print("Error: API 'napcat_forward_msg' is not supported by this NapCat instance.", file=sys.stderr)
+        return 1
     if not require_online(api):
         return 1
-    msg_type = args.target_type
-    target_id = args.target_id
-    msg_id = args.message_id
-    kwargs = {"message_id": msg_id}
-    if msg_type == "group":
-        kwargs["group_id"] = args.group  # source group
-        kwargs["target_group_id"] = target_id  # target group
-    else:
-        kwargs["user_id"] = target_id
-    result = api.call("forward_friend_msg" if msg_type == "private" else "forward_group_msg", **kwargs)
+    result = api.call("napcat_forward_msg", group_id=args.group_id, message_id=args.message_id)
     print(json.dumps(result, indent=2, ensure_ascii=False))
     return 0 if result.get("retcode") == 0 else 1
 
@@ -693,6 +720,9 @@ def cmd_send_poke(args: argparse.Namespace, api: NapCatAPI) -> int:
 
 def cmd_create_schedule(args: argparse.Namespace, api: NapCatAPI) -> int:
     """napcat create_schedule - Create a scheduled message."""
+    if api.is_api_supported("create_schedule") is False:
+        print("Error: API 'create_schedule' is not supported by this NapCat instance.", file=sys.stderr)
+        return 1
     if not require_online(api):
         return 1
     msg_type = args.target_type
@@ -726,6 +756,9 @@ def cmd_create_schedule(args: argparse.Namespace, api: NapCatAPI) -> int:
 
 def cmd_schedule_list(args: argparse.Namespace, api: NapCatAPI) -> int:
     """napcat schedule list - List scheduled messages."""
+    if api.is_api_supported("get_schedule_list") is False:
+        print("Error: API 'get_schedule_list' is not supported by this NapCat instance.", file=sys.stderr)
+        return 1
     if not require_online(api):
         return 1
     kwargs: dict = {}
@@ -780,7 +813,7 @@ def cmd_get_cookies(args: argparse.Namespace, api: NapCatAPI) -> int:
     """napcat get_cookies - Get QQ web cookies."""
     if not require_online(api):
         return 1
-    result = api.call("get_cookies", url=args.qs)
+    result = api.call("napcat_get_cookies", domain=args.domain)
     print(json.dumps(result, indent=2, ensure_ascii=False))
     return 0 if result.get("retcode") == 0 else 1
 
@@ -812,11 +845,15 @@ def cmd_react(args: argparse.Namespace, api: NapCatAPI) -> int:
 def cmd_search(args: argparse.Namespace, api: NapCatAPI) -> int:
     """napcat search - Search messages by keyword in event history."""
     reader = EventsReader(DATA_DIR)
+    keyword = args.keyword or getattr(args, "keyword_flag", None)
+    if not keyword:
+        print("Error: keyword is required (use positional or --keyword)", file=sys.stderr)
+        return 1
     events = reader.read(
         limit=args.limit,
         since=args.since,
         event_type=args.event_type,
-        keyword=args.keyword,
+        keyword=keyword,
     )
     results = events
     print(f"Found {len(results)} matching messages", file=sys.stderr)
@@ -1180,60 +1217,119 @@ FS_TREE = """\
 """
 
 
+def _default_wake_prompt(reason: str) -> str:
+    return (f"[napcat-cli 手动唤醒] reason={reason}。请用 `napcat events` / `napcat alerts` "
+            f"查看最新动态，结合上下文酌情处理与回复。")
+
+
+def _build_waker_for_cli(cfg, transport: str | None = None):
+    """Build a Waker from config, optionally overriding the primary transport."""
+    from napcat_cli.wake_presets import build_waker
+    if transport and transport in ("http", "cli"):
+        import copy
+        cfg = copy.copy(cfg)
+        cfg.wake_primary = transport
+    return build_waker(cfg)
+
+
 def cmd_wake(args: argparse.Namespace, api: NapCatAPI) -> int:
-    """napcat wake - Trigger a daemon wake."""
-    from napcat_cli.wake import build_wake_command
-
+    """napcat wake - Deliver a wake to the configured agent (HTTP/CLI, auto-fallback)."""
     cfg = get_config()
-    reason = args.reason
+    sub = getattr(args, "wake_subcommand", None)
 
-    # Method 1: wake_command (shell command)
-    if cfg.wake_command:
-        cmd = build_wake_command(cfg.wake_command, reason)
-        if cmd:
-            if getattr(args, "dry_run", False):
+    if sub == "test":
+        return _wake_test(cfg)
+    if sub == "sessions":
+        return _wake_sessions(cfg)
+
+    reason = getattr(args, "reason", "manual")
+    prompt = getattr(args, "prompt", None) or _default_wake_prompt(reason)
+    transport = getattr(args, "transport", None)
+    dry_run = getattr(args, "dry_run", False)
+    timeout = getattr(args, "wake_timeout", None) or 120.0
+
+    waker = _build_waker_for_cli(cfg, transport)
+
+    # No backend configured → legacy wake_command escape hatch, else guidance.
+    if waker.empty:
+        if cfg.wake_command:
+            from napcat_cli.wake import build_wake_command
+            cmd = build_wake_command(cfg.wake_command, reason)
+            if dry_run:
                 print(cmd)
                 return 0
+            import subprocess
             try:
-                import subprocess
-                result = subprocess.run(cmd, shell=True, check=True, timeout=30,
-                    capture_output=True, text=True)
-                if result.stdout:
-                    print(result.stdout, end="")
-                print(f"Wake command executed: {reason}")
-                return 0
+                r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=30)
+                if r.stdout:
+                    print(r.stdout, end="")
+                print(f"Legacy wake executed ({reason})", file=sys.stderr)
+                return r.returncode
             except Exception as e:
-                print(f"Wake command failed: {e}", file=sys.stderr)
+                print(f"Legacy wake failed: {e}", file=sys.stderr)
                 return 1
-
-    # Method 2: HTTP wake via daemon alert
-    try:
-        import urllib.request
-        import urllib.parse
-        host = urllib.parse.urlparse(cfg.api_url).hostname or "127.0.0.1"
-        url = f"http://{host}:{cfg.http_port}/alert"
-        data = json.dumps({"alert": "NAPCAT_CLI_WAKE", "reason": reason}).encode()
-        req = urllib.request.Request(url, data=data, method="POST",
-            headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            print(f"Wake alert sent via daemon (port {cfg.http_port}): {reason}")
-            return 0
-    except Exception as e:
-        print(f"Daemon HTTP wake failed: {e}", file=sys.stderr)
-
-    # Method 3: Write alert file as fallback
-    alert_file = DATA_DIR / cfg.alert_dir / "wake.json"
-    try:
-        alert_file.write_text(json.dumps({
-            "alert": "NAPCAT_CLI_WAKE",
-            "reason": reason,
-            "timestamp": int(__import__("time").time())
-        }))
-        print(f"Wake alert written to {alert_file}: {reason}")
-        return 0
-    except Exception as e:
-        print(f"Wake failed: {e}", file=sys.stderr)
+        print("No wake backend configured. Run `napcat setup` (Hermes preset) or set "
+              "wake_preset/wake_session/wake_http_*/wake_cli_command.", file=sys.stderr)
         return 1
+
+    if dry_run:
+        # Render every configured transport so the user sees what would fire.
+        print(f"# dry-run — reason={reason}, primary={waker.primary}")
+        any_shown = False
+        for b in waker.backends:
+            res = b.wake(prompt, reason, {}, "dry-run", dry_run=True)
+            print(f"[{b.name}] {res.detail}")
+            any_shown = True
+        if not any_shown:
+            print("(no transport configured)")
+        return 0
+
+    res = waker.wake(prompt, reason, timeout=timeout)
+    if res.ok:
+        print(f"Wake delivered via {res.transport} ({reason}) — {res.detail}", file=sys.stderr)
+        return 0
+    print(f"Wake failed via {res.transport}: {res.detail}", file=sys.stderr)
+    return 1
+
+
+def _wake_test(cfg) -> int:
+    """Probe each configured wake transport."""
+    waker = _build_waker_for_cli(cfg)
+    print(f"preset={cfg.wake_preset} primary={cfg.wake_primary} session={cfg.wake_session}")
+    if waker.empty:
+        if cfg.wake_command:
+            print(f"  [legacy] wake_command is set: {cfg.wake_command[:80]}")
+        else:
+            print("  No wake backend configured. Run `napcat setup`.")
+        return 1
+    rc = 0
+    for t in waker.test():
+        tag = "OK" if (t["configured"] and t["reachable"]) else "--"
+        print(f"  [{tag}] {t['transport']:5} configured={t['configured']} reachable={t['reachable']} ({t['label']})")
+        if t["configured"] and not t["reachable"]:
+            rc = 1
+    # CLI: also note whether the hermes binary is on PATH
+    if cfg.wake_preset == "hermes":
+        import shutil
+        print(f"  hermes on PATH: {bool(shutil.which('hermes'))}")
+    return rc
+
+
+def _wake_sessions(cfg) -> int:
+    """List agent sessions (Hermes /api/sessions when the HTTP backend is configured)."""
+    waker = _build_waker_for_cli(cfg)
+    sessions = waker.list_sessions()
+    if sessions is None:
+        print("Sessions listing requires the HTTP backend (configure wake_http_url + "
+              "wake_http_key, e.g. via `napcat setup` opt-in).", file=sys.stderr)
+        return 1
+    if not sessions:
+        print("No sessions found.")
+        return 0
+    print(f"Sessions ({len(sessions)}):")
+    for s in sessions[:30]:
+        print(f"  {s.get('id','?'):40} {s.get('title','')[:50]}  {s.get('last_active','')}")
+    return 0
 
 
 def cmd_fs(args: argparse.Namespace, api: NapCatAPI) -> int:
@@ -1378,7 +1474,12 @@ def main() -> int:
     ga.add_argument("--enable", action="store_true", default=True)
     ga.add_argument("--disable", action="store_true", default=False)
 
-    gr = group_sub.add_parser("rename", help="Set group card name")
+    gr = group_sub.add_parser(
+        "rename",
+        help="Set group card name",
+        usage="napcat group rename <group_id> <user_id> <card>",
+        epilog="Example: napcat group rename 1050866499 3914024488 '测试名片'",
+    )
     gr.add_argument("group_id")
     gr.add_argument("user_id")
     gr.add_argument("card", help="Card name")
@@ -1451,10 +1552,12 @@ def main() -> int:
     flf.add_argument("folder_id")
 
     finfo = file_sub.add_parser("info", help="Get file info")
-    finfo.add_argument("file_id")
+    finfo.add_argument("group_id", help="Group ID")
+    finfo.add_argument("file_id", help="File ID")
 
     fd = file_sub.add_parser("download", help="Download a file")
-    fd.add_argument("file_id")
+    fd.add_argument("group_id", help="Group ID")
+    fd.add_argument("file_id", help="File ID")
     fd.add_argument("--output-dir", "-o", default=None)
 
     # --- daemon ---
@@ -1512,7 +1615,8 @@ def main() -> int:
 
     # --- search ---
     search_p = subparsers.add_parser("search", help="Search messages by keyword in event history")
-    search_p.add_argument("keyword", help="Keyword to search for")
+    search_p.add_argument("keyword", nargs="?", default=None, help="Keyword to search for (positional)")
+    search_p.add_argument("--keyword", dest="keyword_flag", default=None, help="Keyword to search for (flag)")
     search_p.add_argument("--limit", "-n", type=int, default=50, help="Max events to scan (default: 50)")
     search_p.add_argument("--since", type=int, default=None, help="Events after timestamp")
     search_p.add_argument("--event-type", "-t", default=None, help="Filter by event type")
@@ -1576,11 +1680,9 @@ def main() -> int:
     schema_p.add_argument("action", nargs="?", default=None, help="Action name (e.g., send_group_message)")
 
     # --- send_forward ---
-    sf = subparsers.add_parser("send_forward", help="Forward a message to a group or private chat")
+    sf = subparsers.add_parser("send_forward", help="Forward a message to a group")
     sf.add_argument("message_id", help="Message ID to forward")
-    sf.add_argument("target_type", choices=["group", "private"])
-    sf.add_argument("target_id", help="Group ID or user ID")
-    sf.add_argument("--group", help="Source group ID (required for group messages)")
+    sf.add_argument("group_id", help="Target group ID")
 
     # --- send_poke ---
     sp = subparsers.add_parser("send_poke", help="Poke a member in a group or private user")
@@ -1613,7 +1715,7 @@ def main() -> int:
 
     # --- get_cookies ---
     gc = subparsers.add_parser("get_cookies", help="Get QQ web cookies")
-    gc.add_argument("qs", nargs="?", default="qq.com", help="Cookie server (default: qq.com)")
+    gc.add_argument("domain", nargs="?", default="qq.com", help="Cookie domain (default: qq.com)")
 
     gsi = subparsers.add_parser("get_stranger_info", help="Get stranger info by QQ number")
     gsi.add_argument("user_id")
@@ -1623,9 +1725,17 @@ def main() -> int:
     subparsers.add_parser("fs", help="Show skills-fs directory tree and workflow")
 
     # --- wake ---
-    wake_p = subparsers.add_parser("wake", help="Trigger a daemon wake")
+    wake_p = subparsers.add_parser("wake", help="Wake the configured agent (HTTP/CLI, auto-fallback)")
     wake_p.add_argument("--reason", "-r", default="manual", help="Wake reason (default: manual)")
-    wake_p.add_argument("--dry-run", action="store_true", help="Print wake command without executing")
+    wake_p.add_argument("--prompt", "-p", default=None, help="Prompt text to send (default: a contextual prompt)")
+    wake_p.add_argument("--transport", choices=["auto", "http", "cli"], default=None,
+                        help="Force a transport for this wake (default: from config / auto)")
+    wake_p.add_argument("--timeout", dest="wake_timeout", type=float, default=None,
+                        help="Per-wake timeout in seconds (default: 120)")
+    wake_p.add_argument("--dry-run", action="store_true", help="Render what would fire without executing")
+    wake_sub = wake_p.add_subparsers(dest="wake_subcommand")
+    wake_sub.add_parser("test", help="Probe each configured transport (configured + reachable)")
+    wake_sub.add_parser("sessions", help="List agent sessions (requires HTTP backend)")
 
     # --- setup ---
     setup_p = subparsers.add_parser("setup", help="Interactive setup wizard")
