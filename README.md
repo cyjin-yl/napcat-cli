@@ -2,6 +2,9 @@
 
 Standalone CLI and daemon for NapCat QQ bot management with skills-fs integration.
 
+[![PyPI](https://img.shields.io/pypi/v/napcat-cli.svg?label=PyPI)](https://pypi.org/project/napcat-cli/)
+[![Python versions](https://img.shields.io/pypi/pyversions/napcat-cli.svg)](https://pypi.org/project/napcat-cli/)
+
 > 📝 **介绍博文：** [napcat-cli 群配置与管理速查](https://yvxi.pages.dev/blog/napcat-cli-group-config/) — 从零配置、群消息收发、Agent Wake 的完整链路。
 
 ---
@@ -48,7 +51,7 @@ napcat wake --reason NEW_MESSAGE
 ## Setup
 
 ```bash
-uv tool install napcat-cli
+uv tool install napcat-cli  # recommended — isolated install via uv (alternative: pip install napcat-cli)
 napcat setup          # interactive — guides token, data dir, skills-fs, wake
 napcat daemon start
 ```
@@ -164,6 +167,21 @@ to read/write NapCat API endpoints through the virtual filesystem.
 
 When `skills_fs_enabled` is true in `daemon.json`, the daemon spawns skills-fs
 automatically with the configured mountpoint and config file.
+
+> ⚙️ **Distribution note:** `skills-fs` is a **compiled Go binary** (git submodule
+> pinned at [`cb13f37`](https://github.com/yandu-app/skills-fs/tree/cb13f37)).
+> It is **not bundled** in the pip/uv install of `napcat-cli`. If you need the
+> FUSE mount (optional), build it separately:
+>
+> ```bash
+> git clone https://github.com/yandu-app/skills-fs
+> cd skills-fs && make build              # produces ./skills-fs
+> napcat config set skills_fs_binary /path/to/skills-fs
+> napcat daemon stop && napcat daemon start
+> ```
+>
+> Or place `skills-fs` on your `PATH` and the daemon will find it. This feature
+> is **optional** — the CLI, daemon, and wake system work without it.
 
 Manual start:
 
