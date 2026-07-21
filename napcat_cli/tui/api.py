@@ -5,6 +5,7 @@ import asyncio
 import json
 import os
 import subprocess
+import sys
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -51,8 +52,10 @@ def _http_post(url: str, body: dict, timeout: int = 10) -> dict:
         return {"error": str(e)}
 
 
-# Resolve the napcat CLI script path (same repo)
-_NAPCAT_SCRIPT = str(Path(__file__).resolve().parent.parent / "napcat")
+# Repo root (the directory containing the ``napcat_cli`` package). Put it on
+# PYTHONPATH for the slash-command subprocess so ``-m napcat_cli.cli`` resolves
+# regardless of the caller's cwd or whether the package is pip-installed.
+_REPO_ROOT = str(Path(__file__).resolve().parents[2])
 
 
 class DaemonClient:
@@ -128,13 +131,16 @@ class DaemonClient:
         return await self.call("napcat_send_msg", params)
 
     async def run_napcat_cli(self, args: list[str]) -> tuple[str, str, int]:
-        """Run the napcat CLI command and return (stdout, stderr, code).
-        This is the reuse path for slash commands — no rewrite."""
+        """Run a napcat CLI command via the package entrypoint, returning
+        ``(stdout, stderr, code)``. This is the reuse path for ``/commands``."""
         def _run() -> tuple[str, str, int]:
+            env = os.environ.copy()
+            pp = env.get("PYTHONPATH", "")
+            env["PYTHONPATH"] = _REPO_ROOT + (os.pathsep + pp if pp else "")
             try:
                 result = subprocess.run(
-                    ["python3", _NAPCAT_SCRIPT] + args,
-                    capture_output=True, text=True, timeout=15
+                    [sys.executable, "-m", "napcat_cli.cli"] + list(args),
+                    capture_output=True, text=True, timeout=30, env=env,
                 )
                 return result.stdout, result.stderr, result.returncode
             except Exception as e:

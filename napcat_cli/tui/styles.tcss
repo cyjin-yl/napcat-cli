@@ -1,68 +1,9 @@
-/* napcat TUI styles — mobile QQ-style layout */
+/* napcat TUI styles — app-wide structural rules ONLY.
+   Widget-specific CSS lives in each screen/widget's own CSS block so there is
+   a single source of truth (splitting rules across files caused specificity
+   conflicts that collapsed the input bar to an invisible 1-row box). */
 
 Screen {
     layout: vertical;
     background: $surface;
 }
-
-/* === Header/Footer === */
-#header-label {
-    height: 2;
-    dock: top;
-    background: $primary;
-    color: $text;
-    text-align: center;
-}
-
-#view-header {
-    height: 2;
-    dock: top;
-    background: $primary;
-    color: $text;
-    text-align: center;
-}
-
-
-/* === Chat List === */
-#chat-listview {
-    height: 1fr;
-    overflow-y: scroll;
-    border: solid $accent;
-}
-
-#chat-listview > ListItem {
-    height: 3;
-    padding: 0 1;
-}
-
-#chat-listview > ListItem:hover {
-    background: $accent;
-}
-
-#chat-listview > ListItem.-unread {
-    background: $accent-lighten-2;
-}
-
-/* === Chat View === */
-#messages {
-    height: 1fr;
-    overflow-y: scroll;
-    padding: 1;
-    border: solid $accent;
-}
-
-#input-bar {
-    height: 3;
-    dock: bottom;
-    border: solid $accent;
-    background: $surface;
-}
-
-#input-bar Input {
-    width: 80%;
-}
-
-#input-bar Button {
-    width: 15%;
-}
-

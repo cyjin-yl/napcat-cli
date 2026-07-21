@@ -42,139 +42,130 @@ _NAPCAT_GROUP_SUB: list[str] = [
     "info", "members", "member", "mute", "unmute", "kick",
     "admin", "rename", "remark", "announce", "list", "essence", "poke",
 ]
+_NAPCAT_FRIEND_SUB: list[str] = ["list", "info", "remark", "add", "delete"]
+_NAPCAT_FILE_SUB: list[str] = [
+    "upload-group", "upload-private", "list-group", "list-folder", "info", "download",
+]
 
 
 class CommandInput(Input):
-    """Input widget with inline command autocomplete overlay."""
+    """Message input with inline ``/command`` autocomplete.
 
-    CSS = """
-    CommandInput {
-        width: 1fr;
-    }
-    CommandInput .-cmd-mode {
-        border: solid $warning;
-    }
-    #cmd-overlay {
-        height: auto;
-        max-height: 6;
-        dock: bottom;
-        background: $surface;
-        border: solid $warning;
-    }
-    #cmd-overlay > ListItem {
-        height: 1;
-        padding: 0 1;
-    }
-    #cmd-overlay > ListItem:hover,
-    #cmd-overlay > ListItem.-selected {
-        background: $primary;
-        color: $text;
-    }
+    Completions render in the screen's static ``#cmd-overlay`` ListView (part of
+    the layout, directly above this input) instead of a dynamically-mounted
+    floating widget — robust under Textual 8.x. ``/cmd`` + Enter runs a napcat
+    CLI command; plain text + Enter sends a message (both are routed through
+    ``ChatViewScreen._handle_submit`` via ``Input.Submitted``).
     """
 
     def __init__(self, *, placeholder: str = "输入消息...", **kwargs) -> None:
         super().__init__(placeholder=placeholder, **kwargs)
+        self._completions: list[str] = []
 
+    # --- overlay (the static #cmd-overlay ListView in the screen) --------
+    def _overlay(self) -> ListView:
+        return self.screen.query_one("#cmd-overlay", ListView)
+
+    def _overlay_visible(self) -> bool:
+        return self._overlay().has_class("-visible")
+
+    def _hide_overlay(self) -> None:
+        self._completions = []
+        overlay = self._overlay()
+        overlay.remove_class("-visible")
+        overlay.clear()
+        self.remove_class("-cmd-mode")
+
+    # --- completions -----------------------------------------------------
+    def _get_completions(self) -> list[str]:
+        # Preserve trailing whitespace: "/group " must still read as "command +
+        # space" so the subcommand list is offered (stripping it would collapse
+        # "/group " back to the top-level "group" match).
+        raw = self.value.lstrip("/")
+        if " " in raw:
+            cmd, _, rest = raw.partition(" ")
+            cmd = cmd.strip()
+            rest = rest.strip()
+            if cmd == "group":
+                return [f"group {s}" for s in _NAPCAT_GROUP_SUB if s.startswith(rest)]
+            if cmd == "friend":
+                return [f"friend {s}" for s in _NAPCAT_FRIEND_SUB if s.startswith(rest)]
+            if cmd == "file":
+                return [f"file {s}" for s in _NAPCAT_FILE_SUB if s.startswith(rest)]
+            return []
+        return [c for c, _ in _NAPCAT_COMMANDS if c.startswith(raw.strip())]
+
+    async def _refresh_overlay(self) -> None:
+        overlay = self._overlay()
+        completions = self._get_completions()
+        if not self.value.startswith("/") or not completions:
+            self._hide_overlay()
+            return
+        self._completions = completions
+        overlay.clear()
+        await overlay.extend(ListItem(Label(c)) for c in completions)
+        overlay.index = 0
+        overlay.add_class("-visible")
+        self.add_class("-cmd-mode")
+
+    def _cycle(self, direction: int) -> None:
+        if not self._completions:
+            return
+        overlay = self._overlay()
+        idx = overlay.index if overlay.index is not None else 0
+        overlay.index = (idx + direction) % len(self._completions)
+
+    def _apply_highlighted(self) -> None:
+        """Insert the highlighted suggestion into the value (menu-complete)."""
+        if not self._completions:
+            return
+        overlay = self._overlay()
+        idx = overlay.index if overlay.index is not None else 0
+        if 0 <= idx < len(self._completions):
+            self.value = "/" + self._completions[idx] + " "
+
+    # --- events ----------------------------------------------------------
     async def _on_key(self, event) -> None:
-        # Override Input's private key handler (runs before the public on_key),
-        # so special keys can be intercepted ahead of Input's default behaviour.
+        # Override Input's private key handler (runs before its default action)
+        # so command-mode keys are intercepted first. Shell-like semantics:
+        #   Tab        menu-complete the highlighted suggestion
+        #   Up/Down    move the highlight through suggestions
+        #   Enter      submit the input as typed (run /command or send message)
+        #   Escape     dismiss the suggestion list
         if self.value.startswith("/"):
             if event.key == "tab":
-                self._tab_next()
+                if not self._completions:
+                    await self._refresh_overlay()
+                self._apply_highlighted()
+                await self._refresh_overlay()  # show subcommands for the completion
                 event.stop()
                 event.prevent_default()
                 return
-            if event.key == "up":
-                self._tab_prev()
-                event.stop()
-                event.prevent_default()
-                return
-            if event.key == "down":
-                self._tab_next()
-                event.stop()
-                event.prevent_default()
-                return
-            if event.key == "enter":
-                self._submit_command()
+            if event.key in ("down", "up"):
+                if not self._overlay_visible():
+                    await self._refresh_overlay()
+                self._cycle(1 if event.key == "down" else -1)
                 event.stop()
                 event.prevent_default()
                 return
             if event.key == "escape":
-                self._clear_overlay()
+                self._hide_overlay()
                 event.stop()
                 event.prevent_default()
                 return
+            # Enter and ordinary characters fall through to Input's default:
+            # Enter fires Input.Submitted -> ChatViewScreen._handle_submit, which
+            # runs the /command or sends the message exactly as typed.
+        # Let Input process the key (insert/delete/cursor) ...
         await super()._on_key(event)
-
-    def _get_completions(self) -> list[str]:
-        """Get command completions based on current prefix."""
-        prefix = self.value.lstrip("/").strip()
-        # Match against top-level commands
-        results = [cmd for cmd, _ in _NAPCAT_COMMANDS if cmd.startswith(prefix)]
-        # If prefix contains space, try group sub-commands
-        if " " in prefix:
-            parts = prefix.split(None, 1)
-            if parts[0] == "group" and parts[1]:
-                results += [f"group {s}" for s in _NAPCAT_GROUP_SUB if s.startswith(parts[1])]
-        return results
-
-    def _update_overlay(self) -> None:
-        """Show or hide the autocomplete overlay."""
-        completions = self._get_completions()
-        screen = self.app.screen
-
-        if not completions:
-            self._clear_overlay()
-            self.remove_class("-cmd-mode")
-            return
-
-        self.add_class("-cmd-mode")
-
-        # Check if overlay already exists
-        if hasattr(self, "_overlay") and self._overlay:
-            # Update existing overlay
-            items = [c for c in completions]
-            self._overlay.clear()
-            self._overlay.update([ListItem(Label(c)) for c in items])
-            self._selected_idx = 0
-            self._overlay.set_offset(self._selected_idx)
-            self._completions = completions
-            return
-
-        # Create new overlay
-        self._completions = completions
-        self._selected_idx = 0
-        self._overlay = ListView([ListItem(Label(c)) for c in completions], id="cmd-overlay")
-        screen.mount(self._overlay)
-
-    def _clear_overlay(self) -> None:
-        """Remove the autocomplete overlay."""
-        if hasattr(self, "_overlay") and self._overlay:
-            self._overlay.remove()
-            self._overlay = None
-        self.remove_class("-cmd-mode")
-
-    def _tab_next(self) -> None:
-        """Cycle to next completion."""
-        if not hasattr(self, "_completions") or not self._completions:
-            self._update_overlay()
-            return
-        self._selected_idx = (self._selected_idx + 1) % len(self._completions)
-        self._overlay.set_offset(self._selected_idx)
-
-    def _tab_prev(self) -> None:
-        """Cycle to previous completion."""
-        if not hasattr(self, "_completions") or not self._completions:
-            self._update_overlay()
-            return
-        self._selected_idx = (self._selected_idx - 1) % len(self._completions)
-        self._overlay.set_offset(self._selected_idx)
-
-    def _submit_command(self) -> None:
-        """Accept selected completion and submit as command."""
-        if hasattr(self, "_completions") and self._completions:
-            self.value = "/" + self._completions[self._selected_idx] + " "
-            self._clear_overlay()
+        # ... then refresh the overlay against the now-current value. Doing it
+        # here (synchronously in the key handler, not via a background worker)
+        # is deterministic: the list updates as part of handling the keypress,
+        # so it can never lag behind or be dropped while the user is typing.
+        if self.value.startswith("/"):
+            await self._refresh_overlay()
+        elif self._overlay_visible():
+            self._hide_overlay()
 
 
 class ChatViewScreen(Screen):
@@ -193,23 +184,48 @@ class ChatViewScreen(Screen):
     }
     #messages {
         height: 1fr;
-        overflow: scroll;
-        padding: 1;
-    }
-    #input-bar {
-        dock: bottom;
-        height: 3;
+        overflow-y: scroll;
+        padding: 1 2;
         border: solid $accent;
-        background: $surface;
+    }
+    /* /command autocomplete dropdown — in-layout, directly above the input
+       bar; hidden unless the input is in command mode. */
+    #cmd-overlay {
+        height: auto;
+        max-height: 6;
+        display: none;
+        background: $surface-lighten-2;
+        border: solid $warning;
+    }
+    #cmd-overlay.-visible {
+        display: block;
+    }
+    #cmd-overlay > ListItem {
+        height: 1;
         padding: 0 1;
     }
+    #cmd-overlay > ListItem.-highlight,
+    #cmd-overlay > ListItem:hover {
+        background: $warning;
+        color: $text;
+    }
+    /* Bottom input bar: children keep their natural height (3, bordered) so
+       the typed text and the button label are actually visible. */
+    #input-bar {
+        dock: bottom;
+        height: auto;
+        padding: 0 1;
+        background: $surface;
+    }
     #msg-input {
-        height: 1;
-        border: solid $accent;
+        width: 1fr;
     }
     #send-btn {
-        width: 6;
-        height: 1;
+        width: auto;
+        min-width: 8;
+    }
+    CommandInput.-cmd-mode {
+        border: solid $warning;
     }
     """
 
@@ -234,6 +250,7 @@ class ChatViewScreen(Screen):
     def compose(self) -> ComposeResult:
         yield Label(f"  {self.chat_name}", id="view-header")
         yield RichLog(id="messages")
+        yield ListView(id="cmd-overlay")
         yield Horizontal(
             CommandInput(placeholder="输入消息 /命令...", id="msg-input"),
             Button("发送", id="send-btn"),
@@ -260,9 +277,7 @@ class ChatViewScreen(Screen):
             return
         input_widget.value = ""
         input_widget.remove_class("-cmd-mode")
-        if hasattr(input_widget, "_overlay") and input_widget._overlay:
-            input_widget._overlay.remove()
-            input_widget._overlay = None
+        input_widget._hide_overlay()
 
         if text.startswith("/"):
             cmd = text[1:].strip()

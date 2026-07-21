@@ -29,9 +29,11 @@ class ChatListScreen(Screen):
     }
     #chat-listview {
         height: 1fr;
+        overflow-y: scroll;
+        border: solid $accent;
     }
     ListItem {
-        height: 4;
+        height: 3;
         padding: 0 1;
         color: $text;
     }
