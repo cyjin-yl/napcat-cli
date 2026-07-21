@@ -75,7 +75,9 @@ class CommandInput(Input):
     def __init__(self, *, placeholder: str = "输入消息...", **kwargs) -> None:
         super().__init__(placeholder=placeholder, **kwargs)
 
-    def on_key(self, event) -> None:
+    async def _on_key(self, event) -> None:
+        # Override Input's private key handler (runs before the public on_key),
+        # so special keys can be intercepted ahead of Input's default behaviour.
         if self.value.startswith("/"):
             if event.key == "tab":
                 self._tab_next()
@@ -102,7 +104,7 @@ class CommandInput(Input):
                 event.stop()
                 event.prevent_default()
                 return
-        super().on_key(event)
+        await super()._on_key(event)
 
     def _get_completions(self) -> list[str]:
         """Get command completions based on current prefix."""
@@ -425,10 +427,10 @@ class ChatViewScreen(Screen):
         self.query_one("#messages", RichLog).scroll_up()
 
     def action_page_up(self) -> None:
-        self.query_one("#messages", RichLog).page_up()
+        self.query_one("#messages", RichLog).scroll_page_up()
 
     def action_page_down(self) -> None:
-        self.query_one("#messages", RichLog).page_down()
+        self.query_one("#messages", RichLog).scroll_page_down()
 
     def _app(self) -> "NapCatApp":
         return self.app  # type: ignore[return-value]

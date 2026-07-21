@@ -87,13 +87,21 @@ class ChatListScreen(Screen):
         """Refresh the chat list from app state."""
         app = self._app()
 
-        # Show only new alerts — deduplicate by stable signature
+        # Collect new alerts (deduplicated by stable signature). Fire ONE aggregated
+        # toast per refresh instead of one-per-alert, so they don't pile up in
+        # the corner; per-chat unread counts in the list still show the detail.
+        new_alerts = []
         for alert in app.alerts:
             sig = app._alert_signature(alert)
             if sig not in app._seen_alerts:
                 app._seen_alerts.add(sig)
-                summary = alert.get("summary", alert.get("message", "Unknown"))
-                self.app.notify(f"\u26a0 {summary}", severity="warning", markup=False)
+                new_alerts.append(alert)
+        if new_alerts:
+            if len(new_alerts) == 1:
+                summary = new_alerts[0].get("summary", new_alerts[0].get("message", "alert"))
+                self.app.notify(f"\U0001f4e9 {summary}", severity="information", markup=False)
+            else:
+                self.app.notify(f"\U0001f4e9 {len(new_alerts)} 条新提醒", severity="information", markup=False)
 
         listview = self.query_one("#chat-listview", ListView)
 
