@@ -63,3 +63,8 @@ bench/baseline.txt
 dist/
 *.egg-info
 build/
+
+# napcat-cli local cruft (do not commit)
+SKILLS_FS_DEGRADED
+debug
+keys.log
