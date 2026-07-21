@@ -672,12 +672,23 @@ class SkillsFsManager:
             shipped = Path(_resolve_shipped_binary())
             if shipped.exists() and shipped.is_file():
                 self.binary = str(shipped)
-            else:
-                # Search PATH
-                import shutil
-                found = shutil.which("skills-fs")
-                if found:
-                    self.binary = found
+        # Try the bundled napcat_cli_fs package (pip install napcat-cli[fs])
+        if not self.binary:
+            try:
+                import napcat_cli_fs as _nfs
+                import importlib.resources as _ir
+                _bin = "skills-fs.exe" if os.name == "nt" else "skills-fs"
+                _p = _ir.files("napcat_cli_fs").joinpath("bin", _bin)
+                if _p.exists():
+                    self.binary = str(_p)
+            except (ImportError, ModuleNotFoundError, Exception):
+                pass
+        # Search PATH
+        if not self.binary:
+            import shutil
+            found = shutil.which("skills-fs")
+            if found:
+                self.binary = found
         self._pid: int | None = None
         self._status: str = "stopped"  # healthy | degraded | stopped
         self._max_restarts = 3

@@ -1,0 +1,134 @@
+# Unified release workflow for napcat-cli + napcat-cli-fs
+#
+# Trigger: manual (workflow_dispatch).
+#   - Builds napcat-cli (pure Python wheel) and napcat-cli-fs (platform wheels
+#     for linux/macos/windows × amd64/arm64).
+#   - Uploads all artifacts.
+#   - If ``publish`` is checked AND ``PYPI_TOKEN`` secret exists, publishes
+#     everything to PyPI. ``skip-existing: true`` so re-runs are idempotent
+#     (allows adding more platform wheels for an already-released version).
+---
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Upload to PyPI (requires PYPI_TOKEN secret)"
+        type: boolean
+        default: false
+
+jobs:
+  build-napcat-cli:
+    name: Build napcat-cli wheel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Build wheel + sdist
+        run: |
+          pip install build
+          python -m build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-napcat-cli
+          path: |
+            dist/*.whl
+            dist/*.tar.gz
+
+  build-fs:
+    name: skills-fs ${{ matrix.label }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: linux-amd64
+            runner: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            binary: skills-fs
+            tag: manylinux_2_17_x86_64.manylinux2014_x86_64
+          - label: linux-arm64
+            runner: ubuntu-latest
+            goos: linux
+            goarch: arm64
+            binary: skills-fs
+            tag: manylinux_2_17_aarch64.manylinux2014_aarch64
+          - label: macos-amd64
+            runner: macos-13
+            goos: darwin
+            goarch: amd64
+            binary: skills-fs
+            tag: macosx_10_9_x86_64
+          - label: macos-arm64
+            runner: macos-14
+            goos: darwin
+            goarch: arm64
+            binary: skills-fs
+            tag: macosx_11_0_arm64
+          - label: windows
+            runner: windows-latest
+            goos: windows
+            goarch: amd64
+            binary: skills-fs.exe
+            tag: win_amd64
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "~1.24"
+          check-latest: true
+          cache-dependency-path: skills-fs/go.sum
+
+      - name: Build binary
+        working-directory: skills-fs
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: CGO_ENABLED=0 go build -o ../napcat-cli-fs/${{ matrix.binary }} ./cmd/skills-fs
+
+      - name: Build platform wheel
+        working-directory: napcat-cli-fs
+        run: python scripts/build-wheel.py ${{ matrix.binary }} "${{ matrix.tag }}" --output-dir dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-fs-${{ matrix.label }}
+          path: napcat-cli-fs/dist/*.whl
+
+  publish:
+    name: Publish to PyPI
+    needs: [build-napcat-cli, build-fs]
+    if: inputs.publish
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/napcat-cli/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheel-*
+          merge-multiple: true
+          path: dist
+
+      - name: Upload to PyPI
+        uses: pypa/gh-action-pypi-publish@v1.12.4
+        with:
+          password: ${{ secrets.PYPI_TOKEN }}
+          packages-dir: dist
+          skip-existing: true
