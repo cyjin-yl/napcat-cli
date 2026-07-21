@@ -1,0 +1,473 @@
+{
+  "skills": [
+    {
+      "name": "napcat-cli",
+      "description": "NapCat QQ bot messaging — send messages, read events, manage groups, handle friends",
+      "enabled": true,
+      "version": "1.0.0",
+      "author": "Ezra",
+      "license": "MIT",
+      "platforms": [
+        "linux"
+      ],
+      "metadata": {
+        "source": "napcat-cli",
+        "category": "messaging"
+      },
+      "allowedTools": [
+        "read_file",
+        "write_file",
+        "list_directory"
+      ],
+      "exposeAtRoot": true,
+      "bodyTemplateFile": "skills-fs.d/skill-body.md",
+      "agentsTemplateFile": "skills-fs.d/skill-agents.md"
+    }
+  ],
+  "mounts": [
+    {
+      "path": "/napcat",
+      "kind": "dir",
+      "mode": "0755"
+    },
+    {
+      "path": "/persona.md",
+      "kind": "blob",
+      "mode": "0444",
+      "dataFile": "skills-fs.d/persona.md"
+    },
+    {
+      "path": "/napcat/groups",
+      "kind": "dynamic_dir",
+      "provider": "napcat",
+      "read": "list_groups"
+    },
+    {
+      "path": "/napcat/groups/:group_id",
+      "kind": "dynamic_dir",
+      "provider": "napcat",
+      "read": "list_time_ranges"
+    },
+    {
+      "path": "/napcat/groups/:group_id/:time_range",
+      "kind": "dynamic_dir",
+      "provider": "napcat",
+      "read": "list_messages"
+    },
+    {
+      "path": "/napcat/groups/:group_id/:time_range/:message_id",
+      "kind": "api",
+      "provider": "napcat",
+      "read": "get_message"
+    },
+    {
+      "path": "/napcat/send_private",
+      "kind": "api",
+      "provider": "napcat",
+      "read": "napcat_send_private_msg",
+      "write": "napcat_send_private_msg",
+      "mode": "0644",
+      "writeParams": "json"
+    },
+    {
+      "path": "/napcat/send_group",
+      "kind": "api",
+      "provider": "napcat",
+      "read": "napcat_send_group_msg",
+      "write": "napcat_send_group_msg",
+      "mode": "0644",
+      "writeParams": "json"
+    },
+    {
+      "path": "/napcat/delete",
+      "kind": "api",
+      "provider": "napcat",
+      "read": "napcat_delete_msg",
+      "write": "napcat_delete_msg",
+      "mode": "0644",
+      "writeParams": "json"
+    },
+    {
+      "path": "/napcat/events",
+      "kind": "api",
+      "provider": "napcat",
+      "read": "get_events",
+      "mode": "0444"
+    },
+    {
+      "path": "/napcat/alerts",
+      "kind": "api",
+      "provider": "napcat",
+      "read": "get_alerts",
+      "mode": "0444"
+    },
+    {
+      "path": "/napcat/clear_alert",
+      "kind": "api",
+      "provider": "napcat",
+      "read": "clear_alert",
+      "write": "clear_alert",
+      "mode": "0644",
+      "writeParams": "json"
+    },
+    {
+      "path": "/napcat/clear_all_alerts",
+      "kind": "api",
+      "provider": "napcat",
+      "read": "clear_all_alerts",
+      "write": "clear_all_alerts",
+      "mode": "0644",
+      "writeParams": "json"
+    },
+    {
+      "path": "/napcat/group_kick",
+      "kind": "api",
+      "provider": "napcat",
+      "read": "napcat_set_group_kick",
+      "write": "napcat_set_group_kick",
+      "mode": "0644",
+      "writeParams": "json"
+    },
+    {
+      "path": "/napcat/group_ban",
+      "kind": "api",
+      "provider": "napcat",
+      "read": "napcat_set_group_ban",
+      "write": "napcat_set_group_ban",
+      "mode": "0644",
+      "writeParams": "json"
+    },
+    {
+      "path": "/napcat/group_essence",
+      "kind": "api",
+      "provider": "napcat",
+      "read": "napcat_set_essence",
+      "write": "napcat_set_essence",
+      "mode": "0644",
+      "writeParams": "json"
+    },
+    {
+      "path": "/napcat/group_sign",
+      "kind": "api",
+      "provider": "napcat",
+      "read": "napcat_group_sign",
+      "write": "napcat_group_sign",
+      "mode": "0644",
+      "writeParams": "json"
+    },
+    {
+      "path": "/napcat/group_admin",
+      "kind": "api",
+      "provider": "napcat",
+      "read": "napcat_set_group_admin",
+      "write": "napcat_set_group_admin",
+      "mode": "0644",
+      "writeParams": "json"
+    },
+    {
+      "path": "/napcat/group_owner",
+      "kind": "api",
+      "provider": "napcat",
+      "read": "napcat_set_group_entire_title",
+      "write": "napcat_set_group_entire_title",
+      "mode": "0644",
+      "writeParams": "json"
+    },
+    {
+      "path": "/napcat/group_name",
+      "kind": "api",
+      "provider": "napcat",
+      "read": "napcat_set_group_name",
+      "write": "napcat_set_group_name",
+      "mode": "0644",
+      "writeParams": "json"
+    },
+    {
+      "path": "/napcat/group_confess",
+      "kind": "api",
+      "provider": "napcat",
+      "read": "napcat_set_group_portrait",
+      "write": "napcat_set_group_portrait",
+      "mode": "0644",
+      "writeParams": "json"
+    },
+    {
+      "path": "/napcat/group_create",
+      "kind": "api",
+      "provider": "napcat",
+      "read": "napcat_create_group",
+      "write": "napcat_create_group",
+      "mode": "0644",
+      "writeParams": "json"
+    },
+    {
+      "path": "/napcat/group_leave",
+      "kind": "api",
+      "provider": "napcat",
+      "read": "napcat_group_leave",
+      "write": "napcat_group_leave",
+      "mode": "0644",
+      "writeParams": "json"
+    },
+    {
+      "path": "/napcat/group_members",
+      "kind": "api",
+      "provider": "napcat",
+      "read": "napcat_get_group_member_list",
+      "mode": "0444"
+    },
+    {
+      "path": "/napcat/group_info",
+      "kind": "api",
+      "provider": "napcat",
+      "read": "napcat_get_group_info",
+      "mode": "0444"
+    },
+    {
+      "path": "/napcat/group_honor",
+      "kind": "api",
+      "provider": "napcat",
+      "read": "napcat_get_group_honor_list",
+      "mode": "0444"
+    },
+    {
+      "path": "/napcat/group_essence_list",
+      "kind": "api",
+      "provider": "napcat",
+      "read": "napcat_get_essence_list",
+      "mode": "0444"
+    },
+    {
+      "path": "/napcat/group_liking",
+      "kind": "api",
+      "provider": "napcat",
+      "read": "napcat_send_like",
+      "write": "napcat_send_like",
+      "mode": "0644",
+      "writeParams": "json"
+    },
+    {
+      "path": "/napcat/group_forward",
+      "kind": "api",
+      "provider": "napcat",
+      "read": "napcat_forward_msg",
+      "write": "napcat_forward_msg",
+      "mode": "0644",
+      "writeParams": "json"
+    },
+    {
+      "path": "/napcat/friend_list",
+      "kind": "api",
+      "provider": "napcat",
+      "read": "napcat_get_friend_list",
+      "mode": "0444"
+    },
+    {
+      "path": "/napcat/friend_add",
+      "kind": "api",
+      "provider": "napcat",
+      "read": "napcat_send_friend_request",
+      "write": "napcat_send_friend_request",
+      "mode": "0644",
+      "writeParams": "json"
+    },
+    {
+      "path": "/napcat/friend_info",
+      "kind": "api",
+      "provider": "napcat",
+      "read": "napcat_get_stranger_info",
+      "mode": "0444"
+    },
+    {
+      "path": "/napcat/credentials",
+      "kind": "api",
+      "provider": "napcat",
+      "read": "napcat_get_credentials",
+      "mode": "0444"
+    },
+    {
+      "path": "/napcat/cookie",
+      "kind": "api",
+      "provider": "napcat",
+      "read": "napcat_get_cookies",
+      "mode": "0444"
+    },
+    {
+      "path": "/napcat/bkn",
+      "kind": "api",
+      "provider": "napcat",
+      "read": "napcat_get_bkn",
+      "mode": "0444"
+    },
+    {
+      "path": "/napcat/status",
+      "kind": "api",
+      "provider": "napcat",
+      "read": "napcat_get_status",
+      "mode": "0444"
+    },
+    {
+      "path": "/napcat/config",
+      "kind": "api",
+      "provider": "napcat",
+      "read": "napcat_get_config",
+      "mode": "0444"
+    },
+    {
+      "path": "/napcat/get_image",
+      "kind": "api",
+      "provider": "napcat",
+      "read": "napcat_get_image",
+      "write": "napcat_get_image",
+      "mode": "0644",
+      "writeParams": "json"
+    },
+    {
+      "path": "/napcat/ocr",
+      "kind": "api",
+      "provider": "napcat",
+      "read": "napcat_ocr",
+      "write": "napcat_ocr",
+      "mode": "0644",
+      "writeParams": "json"
+    },
+    {
+      "path": "/napcat/goon",
+      "kind": "api",
+      "provider": "napcat",
+      "read": "napcat_goon",
+      "write": "napcat_goon",
+      "mode": "0644",
+      "writeParams": "json"
+    },
+    {
+      "path": "/napcat/approve_request",
+      "kind": "api",
+      "provider": "napcat",
+      "read": "napcat_approve_request",
+      "write": "napcat_approve_request",
+      "mode": "0644",
+      "writeParams": "json"
+    },
+    {
+      "path": "/napcat/reject_request",
+      "kind": "api",
+      "provider": "napcat",
+      "read": "napcat_reject_request",
+      "write": "napcat_reject_request",
+      "mode": "0644",
+      "writeParams": "json"
+    },
+    {
+      "path": "/napcat/AGENTS.md",
+      "kind": "blob",
+      "mode": "0444",
+      "dataFile": "skills-fs.d/agents-napcat.md"
+    },
+    {
+      "path": "/napcat/groups/AGENTS.md",
+      "kind": "blob",
+      "mode": "0444",
+      "dataFile": "skills-fs.d/agents-groups.md"
+    },
+    {
+      "path": "/napcat/groups/:group_id/AGENTS.md",
+      "kind": "blob",
+      "mode": "0444",
+      "dataFile": "skills-fs.d/agents-group.md"
+    },
+    {
+      "path": "/napcat/groups/:group_id/:time_range/AGENTS.md",
+      "kind": "blob",
+      "mode": "0444",
+      "dataFile": "skills-fs.d/agents-group-time.md"
+    },
+    {
+      "path": "/napcat/groups/:group_id/send",
+      "kind": "api",
+      "provider": "napcat",
+      "read": "send_group_message",
+      "write": "send_group_message",
+      "mode": "0644",
+      "writeParams": "json"
+    },
+    {
+      "path": "/napcat/friends",
+      "kind": "dynamic_dir",
+      "provider": "napcat",
+      "read": "list_friends"
+    },
+    {
+      "path": "/napcat/friends/:user_id",
+      "kind": "dynamic_dir",
+      "provider": "napcat",
+      "read": "list_time_ranges"
+    },
+    {
+      "path": "/napcat/friends/:user_id/:time_range",
+      "kind": "dynamic_dir",
+      "provider": "napcat",
+      "read": "list_messages"
+    },
+    {
+      "path": "/napcat/friends/:user_id/:time_range/:message_id",
+      "kind": "api",
+      "provider": "napcat",
+      "read": "get_message"
+    },
+    {
+      "path": "/napcat/friends/:user_id/send",
+      "kind": "api",
+      "provider": "napcat",
+      "read": "send_private_message",
+      "write": "send_private_message",
+      "mode": "0644",
+      "writeParams": "json"
+    },
+    {
+      "path": "/napcat/friends/AGENTS.md",
+      "kind": "blob",
+      "mode": "0444",
+      "dataFile": "skills-fs.d/agents-friends.md"
+    },
+    {
+      "path": "/napcat/friends/:user_id/AGENTS.md",
+      "kind": "blob",
+      "mode": "0444",
+      "dataFile": "skills-fs.d/agents-friend.md"
+    },
+    {
+      "path": "/napcat/send_forward",
+      "kind": "api",
+      "provider": "napcat",
+      "read": "forward_msg",
+      "write": "forward_msg",
+      "mode": "0644",
+      "writeParams": "json"
+    },
+    {
+      "path": "/napcat/send_poke",
+      "kind": "api",
+      "provider": "napcat",
+      "read": "send_poke",
+      "write": "send_poke",
+      "mode": "0644",
+      "writeParams": "json"
+    },
+    {
+      "path": "/napcat/create_schedule",
+      "kind": "api",
+      "provider": "napcat",
+      "read": "create_schedule",
+      "write": "create_schedule",
+      "mode": "0644",
+      "writeParams": "json"
+    },
+    {
+      "path": "/napcat/friends/:user_id/:time_range/AGENTS.md",
+      "kind": "blob",
+      "mode": "0444",
+      "dataFile": "skills-fs.d/agents-friend-time.md"
+    }
+  ]
+}
