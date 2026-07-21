@@ -428,9 +428,14 @@ def cmd_daemon(args: argparse.Namespace, api: NapCatAPI) -> int:
         }
         cfg_path.write_text(json.dumps(cfg_dict, indent=2))
 
-        # Launch daemon as background process
+        # Launch daemon as background process. Put the source tree on PYTHONPATH
+        # so `-m napcat_cli.daemon.watch` resolves regardless of the caller's cwd
+        # (no system-pip install required).
+        repo_root = str(Path(__file__).resolve().parents[1])
+        env = os.environ.copy()
+        env["PYTHONPATH"] = repo_root + (os.pathsep + env["PYTHONPATH"]) if env.get("PYTHONPATH") else repo_root
         cmd = [sys.executable, "-m", "napcat_cli.daemon.watch", str(cfg_path)]
-        proc = subprocess.Popen(cmd, stdout=open(DATA_DIR / "daemon.log", "a"), stderr=subprocess.STDOUT)
+        proc = subprocess.Popen(cmd, stdout=open(DATA_DIR / "daemon.log", "a"), stderr=subprocess.STDOUT, env=env)
         print(f"Daemon started (PID: {proc.pid})", file=sys.stderr)
         print(f"Log: {DATA_DIR / 'daemon.log'}")
         return 0
