@@ -631,7 +631,10 @@ async def ws_daemon(ws_url: str, processor: EventProcessor, cache: EventCache) -
 # Skills-fs FUSE Manager — spawn, monitor, restart on crash
 # ---------------------------------------------------------------------------
 
-_DEFAULT_MOUNTPOINT = str(Path.home() / ".napcat-data" / "skills")
+# Default mountpoint is the napcat-cli skill directory itself, so skills-fs
+# FUSE-overlays it: mounted => generated SKILL.md/AGENTS.md + the /napcat/ tree
+# take over; unmounted => the static skill files (pre-mount) reappear.
+_DEFAULT_MOUNTPOINT = str(Path.home() / ".hermes" / "skills" / "napcat-cli")
 _DEFAULT_SKILLSFS_CONFIG = str(Path.home() / ".napcat-data" / "skills-fs.json")
 def _resolve_shipped_binary() -> str:
     """Return the shipped skills-fs binary path for source-tree dev mode, or '' if absent."""

@@ -268,14 +268,14 @@ def run_setup(non_interactive: bool = False, yes: bool = False, force: bool = Fa
 
     # --- 3. skills-fs ---
     print("[3] skills-fs configuration")
+    _skill_dir = str(Path.home() / ".hermes" / "skills" / "napcat-cli")
     if non_interactive:
-        cfg.skills_fs_mountpoint = os.environ.get("NAPCAT_SKILLSFS_MOUNTPOINT",
-            str(Path.home() / ".napcat-data" / "skills"))
+        cfg.skills_fs_mountpoint = os.environ.get("NAPCAT_SKILLSFS_MOUNTPOINT", _skill_dir)
         cfg.skills_fs_config = os.environ.get("NAPCAT_SKILLSFS_CONFIG",
             str(Path.home() / ".napcat-data" / "skills-fs.json"))
     else:
         cfg.skills_fs_mountpoint = _prompt_str(
-            "skills-fs mountpoint", str(Path.home() / ".napcat-data" / "skills"))
+            "skills-fs mountpoint (overlay target = the skill dir)", _skill_dir)
         cfg.skills_fs_config = _prompt_str(
             "skills-fs config path", str(Path.home() / ".napcat-data" / "skills-fs.json"))
     cfg.skills_fs_enabled = True

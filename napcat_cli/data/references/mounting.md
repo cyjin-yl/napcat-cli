@@ -1,10 +1,14 @@
 # Mounting skills-fs (optional, read this first)
 
-`skills-fs` is an **optional** FUSE layer that overlays the napcat-cli skill
-directory with a virtual `/napcat/` filesystem — you can `cat` events, `echo`
-JSON into `send_group` to send messages, browse `groups/{id}/...` as directories.
-The `napcat` CLI does **not** need it; this is for agents/workflows that prefer a
-filesystem interface.
+`skills-fs` is an **optional** FUSE layer. It mounts **directly on the napcat-cli
+skill directory** (`~/.hermes/skills/napcat-cli/`) and takes it over: while
+mounted, that directory serves the generated `SKILL.md`/`AGENTS.md`/`persona.md`
+plus the virtual `/napcat/` filesystem (read events, `echo` JSON into
+`send_group`, browse `groups/{id}/...`). **Unmount and the original static skill
+files reappear** — skills-fs generates into memory only, never overwriting them.
+
+The `napcat` CLI does **not** need the mount; this is for agents/workflows that
+prefer a filesystem interface.
 
 > ⚠️ **Known hazard — FUSE D-state wedges.** If multiple skills-fs daemons mount
 > the same point, or the daemon does an unbounded read on a hung FUSE, the process
@@ -12,6 +16,20 @@ filesystem interface.
 > surviving `umount -l`. On 2026-07-22 a 2-week-old pileup of these forced a
 > **kernel panic on reboot**. skills-fs is therefore shipped **disabled by
 > default** (`skills_fs_enabled=false`).
+
+## Overlay semantics (what the agent sees)
+
+- **Not mounted** → the skill dir shows the **static** files: the pre-mount
+  `SKILL.md` (says so, full CLI guide, how to mount), `references/`, etc.
+- **Mounted** → skills-fs overlays the dir: the agent reads the **generated**
+  `SKILL.md` (describes the `/napcat/` tree), generated `AGENTS.md`, `persona.md`,
+  and the `/napcat/` virtual filesystem. `SKILLS_FS_DEGRADED` (if present) is
+  hidden under the mount.
+- skills-fs **generates into memory only** — it does not write `SKILL.md` to the
+  skill dir on disk, so the static files underneath are preserved. `Generate`'s
+  `Remove` only drops memory state; it never `rm`s the skill dir.
+- Generated files are served **read-only (0o444)** — writes are denied, since the
+  content is regenerated on next start.
 
 ## Prevention already in place (napcat-cli ≥ 2.0.0)
 
@@ -28,10 +46,11 @@ filesystem interface.
 
 ```bash
 napcat config set skills_fs_enabled true
+napcat config set skills_fs_mountpoint ~/.hermes/skills/napcat-cli   # the skill dir
 napcat daemon stop && napcat daemon start
-# verify: a single skills-fs process, mount present, daemon NOT in D state
+# verify: a single skills-fs process, mount on the skill dir, daemon NOT in D state
 napcat daemon status
-mount | grep napcat              # should show one skillsfs mount
+mount | grep napcat              # one skillsfs mount on ~/.hermes/skills/napcat-cli
 ps -o pid,stat,cmd -C python3 | grep -E 'D |watch'   # must show no 'D'
 ```
 
@@ -40,7 +59,7 @@ hand:
 
 ```bash
 skills-fs fuse --config ~/.napcat-data/skills-fs.json \
-  --mountpoint ~/.napcat-data/skills --allow-other \
+  --mountpoint ~/.hermes/skills/napcat-cli --allow-other \
   --log-file ~/.napcat-data/skills-fs.log --log-level info
 ```
 
@@ -66,4 +85,6 @@ prevention above is precisely what avoids reaching that point.
 - **`skills-fs: no binary found`** — install/build the Go binary (`cd skills-fs
   && make build`) or set `skills_fs_binary`.
 - **`SKILLS_FS_DEGRADED` appears in the skill dir** — skills-fs gave up; the
-  daemon is running without the FUSE tree. CLI still works.
+  daemon is running without the FUSE tree. CLI still works. (It disappears
+  automatically once skills-fs mounts successfully.)
+
