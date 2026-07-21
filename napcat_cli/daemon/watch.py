@@ -1155,6 +1155,14 @@ class NapCatHandler(BaseHTTPRequestHandler):
         """Prepend a reply segment to base segments."""
         return [{"type": "reply", "data": {"id": str(message_id)}}] + base_segments
 
+    def _resolve_payload(self, params: dict, fallback_key: str) -> str:
+        """Resolve payload from _payload (skills-fs raw mode) or a named fallback key (HTTP POST)."""
+        v = params.get("_payload")
+        if v:
+            return v
+        v = params.get(fallback_key)
+        return "" if v is None else str(v)
+
 
     def _dispatch(self, action: str, params: dict) -> Any:
         """Dispatch action to handler. Returns data for skills-fs."""
@@ -1332,7 +1340,7 @@ class NapCatHandler(BaseHTTPRequestHandler):
         # ---- send_group_* ----
         if action == "send_group_text":
             group_id = str(params.get("group_id", ""))
-            payload = params.get("_payload", "")
+            payload = self._resolve_payload(params, "text")
             if not group_id or not payload:
                 return {"error": "group_id and payload are required", "expected_schema": ACTION_SCHEMAS.get("send_group_text", {})}
             from napcat_cli.lib.api import NapCatAPI
@@ -1343,7 +1351,7 @@ class NapCatHandler(BaseHTTPRequestHandler):
 
         if action == "send_group_image":
             group_id = str(params.get("group_id", ""))
-            payload = params.get("_payload", "")
+            payload = self._resolve_payload(params, "path")
             if not group_id or not payload:
                 return {"error": "group_id and payload (file path) are required", "expected_schema": ACTION_SCHEMAS.get("send_group_image", {})}
             from napcat_cli.lib.api import NapCatAPI
@@ -1357,7 +1365,7 @@ class NapCatHandler(BaseHTTPRequestHandler):
 
         if action == "send_group_file":
             group_id = str(params.get("group_id", ""))
-            payload = params.get("_payload", "")
+            payload = self._resolve_payload(params, "path")
             if not group_id or not payload:
                 return {"error": "group_id and payload (file path) are required", "expected_schema": ACTION_SCHEMAS.get("send_group_file", {})}
             try:
@@ -1367,7 +1375,7 @@ class NapCatHandler(BaseHTTPRequestHandler):
 
         if action == "send_group_cqcode":
             group_id = str(params.get("group_id", ""))
-            payload = params.get("_payload", "")
+            payload = self._resolve_payload(params, "cqcode")
             if not group_id or not payload:
                 return {"error": "group_id and payload (CQ code) are required", "expected_schema": ACTION_SCHEMAS.get("send_group_cqcode", {})}
             from napcat_cli.lib.api import NapCatAPI
@@ -1401,7 +1409,7 @@ class NapCatHandler(BaseHTTPRequestHandler):
         # ---- send_private_* ----
         if action == "send_private_text":
             user_id = str(params.get("user_id", ""))
-            payload = params.get("_payload", "")
+            payload = self._resolve_payload(params, "text")
             if not user_id or not payload:
                 return {"error": "user_id and payload are required", "expected_schema": ACTION_SCHEMAS.get("send_private_text", {})}
             from napcat_cli.lib.api import NapCatAPI
@@ -1412,7 +1420,7 @@ class NapCatHandler(BaseHTTPRequestHandler):
 
         if action == "send_private_image":
             user_id = str(params.get("user_id", ""))
-            payload = params.get("_payload", "")
+            payload = self._resolve_payload(params, "path")
             if not user_id or not payload:
                 return {"error": "user_id and payload (file path) are required", "expected_schema": ACTION_SCHEMAS.get("send_private_image", {})}
             from napcat_cli.lib.api import NapCatAPI
@@ -1426,7 +1434,7 @@ class NapCatHandler(BaseHTTPRequestHandler):
 
         if action == "send_private_file":
             user_id = str(params.get("user_id", ""))
-            payload = params.get("_payload", "")
+            payload = self._resolve_payload(params, "path")
             if not user_id or not payload:
                 return {"error": "user_id and payload (file path) are required", "expected_schema": ACTION_SCHEMAS.get("send_private_file", {})}
             try:
@@ -1436,7 +1444,7 @@ class NapCatHandler(BaseHTTPRequestHandler):
 
         if action == "send_private_cqcode":
             user_id = str(params.get("user_id", ""))
-            payload = params.get("_payload", "")
+            payload = self._resolve_payload(params, "cqcode")
             if not user_id or not payload:
                 return {"error": "user_id and payload (CQ code) are required", "expected_schema": ACTION_SCHEMAS.get("send_private_cqcode", {})}
             from napcat_cli.lib.api import NapCatAPI
@@ -1471,7 +1479,7 @@ class NapCatHandler(BaseHTTPRequestHandler):
         if action == "reply_group_text":
             group_id = str(params.get("group_id", ""))
             message_id = str(params.get("message_id", ""))
-            payload = params.get("_payload", "")
+            payload = self._resolve_payload(params, "text")
             if not group_id or not message_id or not payload:
                 return {"error": "group_id, message_id, and payload are required", "expected_schema": ACTION_SCHEMAS.get("reply_group_text", {})}
             from napcat_cli.lib.api import NapCatAPI
@@ -1484,7 +1492,7 @@ class NapCatHandler(BaseHTTPRequestHandler):
         if action == "reply_group_image":
             group_id = str(params.get("group_id", ""))
             message_id = str(params.get("message_id", ""))
-            payload = params.get("_payload", "")
+            payload = self._resolve_payload(params, "path")
             if not group_id or not message_id or not payload:
                 return {"error": "group_id, message_id, and payload are required", "expected_schema": ACTION_SCHEMAS.get("reply_group_image", {})}
             from napcat_cli.lib.api import NapCatAPI
@@ -1499,7 +1507,7 @@ class NapCatHandler(BaseHTTPRequestHandler):
 
         if action == "reply_group_file":
             group_id = str(params.get("group_id", ""))
-            payload = params.get("_payload", "")
+            payload = self._resolve_payload(params, "path")
             if not group_id or not payload:
                 return {"error": "group_id and payload (file path) are required", "expected_schema": ACTION_SCHEMAS.get("reply_group_file", {})}
             try:
@@ -1510,7 +1518,7 @@ class NapCatHandler(BaseHTTPRequestHandler):
         if action == "reply_group_cqcode":
             group_id = str(params.get("group_id", ""))
             message_id = str(params.get("message_id", ""))
-            payload = params.get("_payload", "")
+            payload = self._resolve_payload(params, "cqcode")
             if not group_id or not message_id or not payload:
                 return {"error": "group_id, message_id, and payload are required", "expected_schema": ACTION_SCHEMAS.get("reply_group_cqcode", {})}
             from napcat_cli.lib.api import NapCatAPI
@@ -1550,7 +1558,7 @@ class NapCatHandler(BaseHTTPRequestHandler):
         if action == "reply_private_text":
             user_id = str(params.get("user_id", ""))
             message_id = str(params.get("message_id", ""))
-            payload = params.get("_payload", "")
+            payload = self._resolve_payload(params, "text")
             if not user_id or not message_id or not payload:
                 return {"error": "user_id, message_id, and payload are required", "expected_schema": ACTION_SCHEMAS.get("reply_private_text", {})}
             from napcat_cli.lib.api import NapCatAPI
@@ -1563,7 +1571,7 @@ class NapCatHandler(BaseHTTPRequestHandler):
         if action == "reply_private_image":
             user_id = str(params.get("user_id", ""))
             message_id = str(params.get("message_id", ""))
-            payload = params.get("_payload", "")
+            payload = self._resolve_payload(params, "path")
             if not user_id or not message_id or not payload:
                 return {"error": "user_id, message_id, and payload are required", "expected_schema": ACTION_SCHEMAS.get("reply_private_image", {})}
             from napcat_cli.lib.api import NapCatAPI
@@ -1578,7 +1586,7 @@ class NapCatHandler(BaseHTTPRequestHandler):
 
         if action == "reply_private_file":
             user_id = str(params.get("user_id", ""))
-            payload = params.get("_payload", "")
+            payload = self._resolve_payload(params, "path")
             if not user_id or not payload:
                 return {"error": "user_id and payload (file path) are required", "expected_schema": ACTION_SCHEMAS.get("reply_private_file", {})}
             try:
@@ -1589,7 +1597,7 @@ class NapCatHandler(BaseHTTPRequestHandler):
         if action == "reply_private_cqcode":
             user_id = str(params.get("user_id", ""))
             message_id = str(params.get("message_id", ""))
-            payload = params.get("_payload", "")
+            payload = self._resolve_payload(params, "cqcode")
             if not user_id or not message_id or not payload:
                 return {"error": "user_id, message_id, and payload are required", "expected_schema": ACTION_SCHEMAS.get("reply_private_cqcode", {})}
             from napcat_cli.lib.api import NapCatAPI

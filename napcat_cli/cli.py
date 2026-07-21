@@ -990,7 +990,7 @@ def cmd_phone(args: argparse.Namespace, api: NapCatAPI) -> int:
 
     if args.non_interactive:
         # Quick status check mode
-        from tui.api import get_client
+        from napcat_cli.tui.api import get_client
         client = get_client()
         try:
             events = asyncio.run(client.get_events(limit=5))
@@ -1004,7 +1004,7 @@ def cmd_phone(args: argparse.Namespace, api: NapCatAPI) -> int:
             return 1
 
     # Full TUI mode
-    from tui.app import NapCatApp
+    from napcat_cli.tui.app import NapCatApp
     app = NapCatApp()
     app.run()
     return 0

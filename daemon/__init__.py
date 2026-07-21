@@ -1,1 +1,0 @@
-"""napcat-cli daemon."""
