@@ -71,6 +71,32 @@ def _make_rotating_logger(path: Path, max_bytes: int = 2_000_000, backup_count: 
     return logger
 
 
+_TIMEOUT = object()  # sentinel returned by _run_with_timeout on timeout
+
+
+def _run_with_timeout(fn, timeout: float, *args):
+    """Run ``fn(*args)`` in a daemon thread, returning its result.
+
+    If it doesn't finish within ``timeout`` seconds, returns ``_TIMEOUT`` and
+    abandons the thread. This is the D-state prevention primitive: a hung FUSE
+    syscall (status read / stat) only blocks the abandoned thread, never the
+    daemon's main thread or asyncio loop, so the process can't get wedged.
+    """
+    box: dict = {"done": False, "result": None}
+
+    def _runner():
+        try:
+            box["result"] = fn(*args)
+        except Exception as e:  # a raised exception => not healthy
+            box["result"] = e
+        box["done"] = True
+
+    t = threading.Thread(target=_runner, daemon=True)
+    t.start()
+    t.join(timeout)
+    return box["result"] if box["done"] else _TIMEOUT
+
+
 class EventProcessor:
     """Process events and generate alerts."""
 
@@ -667,6 +693,14 @@ class SkillsFsManager:
             self._write_degraded("skills-fs binary not found")
             return False
 
+        # Reuse an already-healthy mount instead of stacking a second FUSE daemon
+        # (multiple skills-fs on one mountpoint is what deadlocks into D-state).
+        if self._existing_mount_healthy():
+            self._status = "healthy"
+            self._restart_count = 0
+            self.processor.log(f"skills-fs: reusing existing healthy mount at {self.mountpoint}")
+            return True
+
         # Clean stale mount before starting
         if not self._stale_cleaned:
             self._clean_stale_mount()
@@ -700,10 +734,14 @@ class SkillsFsManager:
             self._write_degraded("pid not available")
             return False
 
-        # Verify mount is accessible
+        # Verify mount is accessible (timeout-guarded). If the mount isn't healthy
+        # within the deadline, kill the child so we don't leave a half-dead FUSE
+        # daemon that would deadlock readers into D-state.
         if not self._verify_mount():
+            self.processor.log("skills-fs: mount not healthy after spawn — killing child, going degraded")
+            self._kill_child()
             self._status = "degraded"
-            self._write_degraded("mount verification failed")
+            self._write_degraded("mount verification failed or timed out")
             return False
 
         self._status = "healthy"
@@ -788,23 +826,68 @@ class SkillsFsManager:
                 import time as _time
                 _time.sleep(0.1)
 
-    def _verify_mount(self) -> bool:
-        """Check that the mountpoint is accessible (read a known file)."""
-        try:
+    def _verify_mount(self, timeout: float = 8.0) -> bool:
+        """Check that the mountpoint is accessible.
+
+        Timeout-guarded: a hung FUSE daemon can never put this process into
+        uninterruptible (D) sleep — the blocking probe runs in a daemon thread
+        that is abandoned if it doesn't return within ``timeout``.
+        """
+        def _probe() -> bool:
             status_file = Path(self.mountpoint) / "status"
             if status_file.exists():
                 status_file.read_text()
                 return True
-            # Fallback: just try to stat the mountpoint itself
             os.stat(self.mountpoint)
-            # Check it's actually a FUSE mount (not just a dir)
             import subprocess
-            result = subprocess.run(
-                ["mount"], capture_output=True, text=True, timeout=5
-            )
+            result = subprocess.run(["mount"], capture_output=True, text=True, timeout=3)
             return self.mountpoint in result.stdout
+
+        res = _run_with_timeout(_probe, timeout)
+        if res is _TIMEOUT:
+            self.processor.log(f"skills-fs: mount verify timed out ({timeout}s) — hung FUSE?")
+            return False
+        return res is True
+
+    def _existing_mount_healthy(self) -> bool:
+        """True if a skillsfs FUSE mount at our mountpoint is already up and
+        responsive. Used to REUSE an existing mount instead of stacking a second
+        FUSE daemon on the same point (stacking is what deadlocks into D-state).
+        """
+        try:
+            import subprocess
+            r = subprocess.run(["mount"], capture_output=True, text=True, timeout=3)
+            if self.mountpoint not in r.stdout:
+                return False
         except Exception:
             return False
+        if not self._verify_mount(timeout=6.0):
+            return False
+        # adopt the existing pidfile so we can manage/stop it later
+        self._wait_for_pid(max_wait=1)
+        return True
+
+    def _kill_child(self) -> None:
+        """SIGTERM then SIGKILL the skills-fs child; don't leave a half-dead FUSE."""
+        if self._pid is None:
+            return
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            try:
+                os.kill(self._pid, sig)
+            except OSError:
+                break
+            import time as _time
+            _time.sleep(0.5)
+            try:
+                os.kill(self._pid, 0)
+            except OSError:
+                break
+        self._unmount()
+        try:
+            Path(self.pidfile).unlink(missing_ok=True)
+        except Exception:
+            pass
+        self._pid = None
 
     def _clean_stale_mount(self) -> None:
         """Lazy-unmount any stale FUSE mount at our mountpoint."""

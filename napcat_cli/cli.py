@@ -45,6 +45,20 @@ def require_online(api: NapCatAPI) -> bool:
     return True
 
 
+def _port_in_use(port: int) -> bool:
+    """True if something is already listening on 127.0.0.1:<port>.
+
+    Guards against stacking a second daemon (or starting one while a D-state
+    zombie still holds the port)."""
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(0.5)
+    try:
+        return s.connect_ex(("127.0.0.1", int(port))) == 0
+    finally:
+        s.close()
+
+
 def _normalize_file_path(path: str) -> str:
     """Convert local file path to file:// URL if needed."""
     if path.startswith(("http://", "https://", "file://", "base64://")):
@@ -368,6 +382,14 @@ def cmd_daemon(args: argparse.Namespace, api: NapCatAPI) -> int:
     # daemon launched via -m
 
     if args.subcommand == "start":
+        # Refuse to stack a second daemon on the same port — multiple daemons
+        # each spawning their own skills-fs on one mountpoint is what deadlocks.
+        cfg = get_config()
+        if _port_in_use(cfg.http_port):
+            print(f"Error: http_port {cfg.http_port} already in use (another daemon running, "
+                  f"or a stale/D-state process holding it). Stop it first or change http_port.",
+                  file=sys.stderr)
+            return 1
         # Check for existing daemon before starting a new one
         pid_file = DATA_DIR / "daemon.pid"
         if pid_file.exists():
