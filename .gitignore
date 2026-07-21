@@ -68,3 +68,7 @@ build/
 SKILLS_FS_DEGRADED
 debug
 keys.log
+
+# Local virtualenvs (their absolute symlinks break the sdist tar)
+.smoke/
+.test-venv/

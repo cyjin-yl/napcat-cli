@@ -20,6 +20,21 @@ dev = ["pytest>=7"]
 [tool.hatch.build.targets.wheel]
 packages = ["napcat_cli"]
 
+[tool.hatch.build.targets.sdist]
+# Keep virtualenvs, the Go submodule, and local cruft out of the source
+# distribution (venv absolute symlinks make the sdist tar unbuildable).
+exclude = [
+  "/.smoke",
+  "/.test-venv",
+  "/skills-fs",
+  "/dist",
+  "/build",
+  "/test_phone_tui.py",
+  "/debug",
+  "/keys.log",
+  "/SKILLS_FS_DEGRADED",
+]
+
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
