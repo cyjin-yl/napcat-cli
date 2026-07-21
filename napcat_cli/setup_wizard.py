@@ -119,7 +119,7 @@ def _check_skills_fs_binary(cfg: NapCatConfig) -> tuple[str, str]:
 
 
 def _install_hermes_skill(cfg: NapCatConfig, force: bool = False) -> None:
-    """Copy SKILL.md and persona.md into ~/.hermes/skills/napcat-cli/."""
+    """Copy SKILL.md, persona.md, and references/ into ~/.hermes/skills/napcat-cli/."""
     hermes_dir = Path.home() / ".hermes" / "skills" / "napcat-cli"
 
     if hermes_dir.exists() and not force:
@@ -131,6 +131,13 @@ def _install_hermes_skill(cfg: NapCatConfig, force: bool = False) -> None:
         skill_data = pkg_resources.files("napcat_cli.data")
         skill_md = skill_data.joinpath("SKILL.md").read_text()
         persona_md = skill_data.joinpath("persona.md").read_text()
+        ref_files: dict[str, str] = {}
+        try:
+            for child in skill_data.joinpath("references").iterdir():
+                if str(child).endswith(".md"):
+                    ref_files[child.name] = child.read_text()
+        except (FileNotFoundError, NotADirectoryError, OSError):
+            pass
     except Exception:
         print("  Could not read bundled skill files, skipping Hermes skill install.", file=sys.stderr)
         return
@@ -138,6 +145,11 @@ def _install_hermes_skill(cfg: NapCatConfig, force: bool = False) -> None:
     hermes_dir.mkdir(parents=True, exist_ok=True)
     (hermes_dir / "SKILL.md").write_text(skill_md)
     (hermes_dir / "persona.md").write_text(persona_md)
+    if ref_files:
+        ref_dir = hermes_dir / "references"
+        ref_dir.mkdir(exist_ok=True)
+        for name, content in ref_files.items():
+            (ref_dir / name).write_text(content)
     print(f"  Hermes skill installed at {hermes_dir}")
 
 

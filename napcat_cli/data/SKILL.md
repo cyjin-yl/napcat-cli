@@ -16,6 +16,14 @@ metadata:
 
 # NapCat CLI Skill
 
+> ⚙️ **Mount state: skills-fs NOT mounted (you are reading the static/pre-mount SKILL.md).**
+> The `napcat` CLI below works **fully without any mount** — it talks directly to the
+> NapCat daemon. Optionally, `skills-fs` can overlay this skill directory with a
+> virtual `/napcat/` filesystem (read events/send messages as files). That mount is
+> **currently disabled for stability** and has known gotchas (FUSE can wedge the
+> daemon into uninterruptible D-state). See `references/mounting.md` before enabling it.
+> When mounted, skills-fs serves its own (post-mount) SKILL.md describing the `/napcat/` tree.
+
 Access QQ bot capabilities via the `napcat` CLI tool (Python-based, installed on PATH). No FUSE mount required — commands talk directly to the NapCat daemon.
 
 ## When to Use
