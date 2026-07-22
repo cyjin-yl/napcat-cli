@@ -75,8 +75,8 @@ If `wake_http_session_id` is unset, the backend resolves it by name via
 
 | Reason | Wake? | Timing |
 |--------|-------|--------|
-| `AT_ME`, `REPLY_TO_ME` | yes | near-immediate (debounce ≤1 s), **cooldown bypassed** |
-| `GROUP_TRIGGER`, `PRIVATE_TRIGGER` | yes | debounced |
+| `AT_ME`, `REPLY_TO_ME`, `DM_ME` | yes | near-immediate (debounce ≤1 s), **cooldown bypassed**. `DM_ME` fires on any private (DM) message. |
+| `GROUP_TRIGGER` | yes | debounced (group trigger-word match) |
 | `NEW_MESSAGE` (not @) | tracked only | a `NEW_MESSAGE_BACKLOG` wake fires if unread > `wake_new_message_idle_seconds` (default 600) |
 | `NEW_FRIEND`, `NEW_REQUEST`, `BOT_BANNED`, `NEW_POKE`, `GROUP_ADMIN_CHANGE`, `NEW_GROUP_MEMBER`, `MY_MESSAGE_RECALLED`, `BOT_KICKED_FROM_GROUP`, `GROUP_DISBANDED`, `BOT_OFFLINE`, `HEALTH_CHECK_OFFLINE` | yes | debounced + cooldown-bounded |
 

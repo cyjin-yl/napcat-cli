@@ -7,9 +7,9 @@ thread so the loop never blocks, and adds:
 
 - **Debounce**: a burst of same-reason events within ``debounce_seconds``
   coalesces into one wake.
-- **Cooldown**: per-reason ``cooldown_seconds`` suppresses repeats. ``AT_ME`` and
-  ``REPLY_TO_ME`` bypass cooldown (near-immediate wake) so direct mentions are
-  answered promptly.
+- **Cooldown**: per-reason ``cooldown_seconds`` suppresses repeats. ``AT_ME``,
+  ``REPLY_TO_ME`` and ``DM_ME`` bypass cooldown (near-immediate wake) so direct
+  mentions and private (DM) messages are answered promptly.
 - **NEW_MESSAGE backlog sweep**: if unread messages accumulate longer than
   ``new_message_idle_seconds`` without a wake, fire a ``NEW_MESSAGE_BACKLOG``
   wake so the agent scans the inbox.
@@ -29,9 +29,9 @@ from .wake_backend import Waker
 from .wake import render_wake_command
 
 # Reasons that should wake near-immediately and ignore cooldown.
-_IMMEDIATE = {"AT_ME", "REPLY_TO_ME"}
+_IMMEDIATE = {"AT_ME", "REPLY_TO_ME", "DM_ME"}
 # Message-class reasons — a wake for any of these counts as "the agent read the inbox".
-_MESSAGE_REASONS = {"AT_ME", "REPLY_TO_ME", "NEW_MESSAGE", "NEW_MESSAGE_BACKLOG",
+_MESSAGE_REASONS = {"AT_ME", "REPLY_TO_ME", "DM_ME", "NEW_MESSAGE", "NEW_MESSAGE_BACKLOG",
                     "GROUP_TRIGGER", "PRIVATE_TRIGGER"}
 
 _PROMPT_FOOTER = (
@@ -81,6 +81,13 @@ def build_prompt(reason: str, events: list[dict]) -> str:
         body = f"。最近一条来自 {who}：{text}" if text else ""
         action = "请尽快查看并回复。" if reason == "AT_ME" else "请查看并酌情回复。"
         return f"【QQ {reason}】{head}{body}。{action}\n{_PROMPT_FOOTER}"
+
+    if reason == "DM_ME":
+        who = _who(events[-1]) if events else "?"
+        text = _event_text(events[-1]) if events else ""
+        head = "你收到一条私聊消息" + (f"（最近 {n} 条）" if n > 1 else "")
+        body = f"。来自 {who}：{text}" if text else f"，来自 {who}"
+        return f"【QQ DM_ME】{head}{body}。请尽快查看并回复。\n{_PROMPT_FOOTER}"
 
     if reason == "NEW_MESSAGE_BACKLOG":
         return f"【QQ 未读积压】有约 {n} 条未读新消息积压了一段时间，请扫一眼收件箱，酌情回复需要回复的。\n{_PROMPT_FOOTER}"

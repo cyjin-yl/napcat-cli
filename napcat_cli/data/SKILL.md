@@ -177,8 +177,9 @@ you don't usually call this yourself. Each wake carries a **contextual prompt**
 that already tells you *what* happened (who @'d you, in which group, the message
 text, counts), so read the prompt before re-querying.
 
-- `AT_ME` / `REPLY_TO_ME` wake you near-immediately and bypass cooldown — these
-  expect a prompt reply. Use `napcat reply <id>` or `napcat send`.
+- `AT_ME` / `REPLY_TO_ME` / `DM_ME` wake you near-immediately and bypass cooldown —
+  these expect a prompt reply (`DM_ME` = someone sent you a private/DM message).
+  Use `napcat reply <id>` or `napcat send`.
 - `NEW_MESSAGE_BACKLOG` means unread messages piled up — scan `napcat events` /
   `napcat alerts` and reply to anything worth replying to.
 - Other events (`NEW_FRIEND`, `NEW_REQUEST`, `BOT_BANNED`, `NEW_POKE`, …) are

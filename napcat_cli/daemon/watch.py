@@ -10,6 +10,7 @@ so skills-fs can query events and proxy NapCat API calls.
 Alert files generated:
 - NAPCAT_CLI_NEW_MESSAGE: Any new message received
 - NAPCAT_CLI_AT_ME: Bot was @mentioned
+- NAPCAT_CLI_DM_ME: Private (DM) message received — wakes the agent at AT_ME level
 - NAPCAT_CLI_REPLY_TO_ME: Reply to bot's message
 - NAPCAT_CLI_NEW_POKE: Poke received
 - NAPCAT_CLI_NEW_REQUEST: Friend/group join request
@@ -169,9 +170,11 @@ class EventProcessor:
         if self.orchestrator is not None:
             self.orchestrator.note_new_message(event.get("time") or time.time())
 
+        is_at_me = False
         if self.self_id:
             raw_str = str(raw_msg)
             if f"[CQ:at,qq={self.self_id}]" in raw_str:
+                is_at_me = True
                 self.writer.write_alert("NAPCAT_CLI_AT_ME", {
                     "summary": f"@mentioned by {nickname} in {'group ' + str(group_id) if group_id else 'DM'}",
                     "sender_id": sender_id,
@@ -210,9 +213,18 @@ class EventProcessor:
         )
         if msg_type == "group" and self.group_trigger_word and self.group_trigger_word in plain_text:
             self._wake("GROUP_TRIGGER", event)
-        elif msg_type == "private":
-            if self.private_trigger == "*" or (self.private_trigger and self.private_trigger in plain_text):
-                self._wake("PRIVATE_TRIGGER", event)
+        elif msg_type == "private" and not is_at_me:
+            # Any private (DM) message wakes at AT_ME level (DM_ME): near-immediate,
+            # cooldown bypassed — same tier as AT_ME. Supersedes the old debounced
+            # PRIVATE_TRIGGER wake. Skipped when the DM already @-mentioned the bot
+            # (AT_ME fired above) to avoid a duplicate immediate wake.
+            self.writer.write_alert("NAPCAT_CLI_DM_ME", {
+                "summary": f"DM from {nickname}({sender_id}): {str(raw_msg)[:50]}",
+                "sender_id": sender_id,
+                "group_id": "",
+                "message_id": msg_id,
+            })
+            self._wake("DM_ME", event)
 
     def _handle_notice(self, event: dict) -> None:
         notice_type = event.get("notice_type", "")

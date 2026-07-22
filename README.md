@@ -95,8 +95,8 @@ docs), with `Authorization: Bearer <key>` and an `Idempotency-Key` header.
 
 | Trigger | Behavior |
 |---------|----------|
-| `AT_ME`, `REPLY_TO_ME` | Near-immediate wake (cooldown bypassed), with who/where/text in the prompt |
-| `GROUP_TRIGGER`, `PRIVATE_TRIGGER` | Debounced wake |
+| `AT_ME`, `REPLY_TO_ME`, `DM_ME` | Near-immediate wake (cooldown bypassed), with who/where/text in the prompt. `DM_ME` fires on any private (DM) message. |
+| `GROUP_TRIGGER` | Debounced wake (group trigger-word match; private messages wake via `DM_ME` instead) |
 | `NEW_MESSAGE` (not @) | Tracked, not woken; if unread longer than `wake_new_message_idle_seconds` → a `NEW_MESSAGE_BACKLOG` wake |
 | `NEW_FRIEND`, `NEW_REQUEST`, `BOT_BANNED`, `NEW_POKE`, `GROUP_ADMIN_CHANGE`, `NEW_GROUP_MEMBER`, `BOT_OFFLINE`, … | Debounced + cooldown-bounded wake so the agent perceives them within a reasonable window |
 

@@ -37,6 +37,17 @@ class TestBuildPrompt:
         assert "456" in p
         assert "在吗" in p
 
+    def test_dm_me_includes_who_text(self):
+        events = [{
+            "user_id": 123, "sender": {"nickname": "Alice"},
+            "message": [{"type": "text", "data": {"text": "在吗"}}],
+        }]
+        p = build_prompt("DM_ME", events)
+        assert "DM_ME" in p
+        assert "Alice" in p
+        assert "在吗" in p
+        assert "私聊" in p
+
     def test_backlog_mentions_count(self):
         p = build_prompt("NEW_MESSAGE_BACKLOG", [{}, {}, {}])
         assert "3" in p
@@ -82,6 +93,15 @@ class TestOrchestration:
         o.submit("AT_ME", {"user_id": 1})
         time.sleep(0.3)
         o.submit("AT_ME", {"user_id": 2})  # would be suppressed for non-immediate reasons
+        time.sleep(0.3)
+        assert len(fk.calls) == 2
+
+    def test_dm_me_bypasses_cooldown(self):
+        fk = FakeWaker()
+        o = WakeOrchestrator(fk, log=lambda m: None, debounce_seconds=0.05, cooldown_seconds=100)
+        o.submit("DM_ME", {"user_id": 1})
+        time.sleep(0.3)
+        o.submit("DM_ME", {"user_id": 2})  # immediate reason → not suppressed
         time.sleep(0.3)
         assert len(fk.calls) == 2
 
