@@ -14,7 +14,7 @@ thread so the loop never blocks, and adds:
   ``new_message_idle_seconds`` without a wake, fire a ``NEW_MESSAGE_BACKLOG``
   wake so the agent scans the inbox.
 - **Contextual prompts**: the wake prompt summarizes *what* happened (who, where,
-  text, counts) instead of a generic "new message".
+  text, counts, image metadata, reply chains) instead of a generic "new message".
 - **Legacy fallback**: if no backend is configured but a ``wake_command`` is set,
   it is run as-is (back-compat for ``echo … >> .agent-wake`` configs).
 """
@@ -36,14 +36,99 @@ _MESSAGE_REASONS = {"AT_ME", "REPLY_TO_ME", "DM_ME", "NEW_MESSAGE", "NEW_MESSAGE
 
 _PROMPT_FOOTER = (
     "你可以用 `napcat events` / `napcat alerts` 查看详情，用 `napcat send`/`napcat reply` 回复。"
+    "\n可用技能: `/napcat/ocr` (OCR识图), `/napcat/get_image` (下载图片), "
+    "`/napcat/groups/:group_id/:time_range/:message_id/:content` (获取媒体内容)。"
 )
 
 
 # ---------------------------------------------------------------------------
-# Prompt construction
+# Prompt construction helpers
 # ---------------------------------------------------------------------------
 
 def _event_text(event: dict) -> str:
+    """Extract text content from event message segments."""
+    msg = event.get("message") if isinstance(event, dict) else None
+    if msg is None and isinstance(event, dict):
+        msg = event.get("raw_message", "")
+    if isinstance(msg, list):
+        return "".join(
+            (s.get("data") or {}).get("text", "")
+            for s in msg
+            if isinstance(s, dict) and s.get("type") == "text"
+        ).strip()
+    return str(msg or "").strip()
+
+
+def _who(event: dict) -> str:
+    s = event.get("sender") if isinstance(event.get("sender"), dict) else {}
+    nick = s.get("nickname") or event.get("user_id") or "?"
+    return f"{nick}({event.get('user_id', '?')})"
+
+
+def _where(event: dict) -> str:
+    g = event.get("group_id")
+    return f"群{g}" if g else "私聊"
+
+
+def _extract_image_meta(event: dict) -> str:
+    """Extract image metadata from event for wake prompt."""
+    msg = event.get("message") if isinstance(event, dict) else None
+    if not isinstance(msg, list):
+        return ""
+    
+    parts = []
+    for seg in msg:
+        if not isinstance(seg, dict):
+            continue
+        seg_type = seg.get("type", "")
+        data = seg.get("data", {})
+        
+        if seg_type == "image":
+            details = []
+            summary = data.get("summary", "").strip()
+            file_id = data.get("file", "").strip() or data.get("file_id", "").strip()
+            url = data.get("url", "").strip()
+            sub_type = data.get("sub_type", "").strip()
+            file_size = data.get("file_size", "")
+            
+            if summary:
+                details.append(f"摘要: {summary}")
+            if file_id:
+                details.append(f"file_id: {file_id}")
+            if url:
+                details.append(f"url: {url}")
+            if sub_type:
+                details.append(f"sub_type: {sub_type}")
+            if file_size:
+                details.append(f"size: {file_size}")
+            
+            if details:
+                parts.append("[图片: " + ", ".join(details) + "]")
+    
+    return "; ".join(parts) if parts else ""
+
+
+def _extract_reply_meta(event: dict) -> str:
+    """Extract reply chain metadata from event."""
+    msg = event.get("message") if isinstance(event, dict) else None
+    if not isinstance(msg, list):
+        return ""
+    
+    for seg in msg:
+        if not isinstance(seg, dict):
+            continue
+        seg_type = seg.get("type", "")
+        data = seg.get("data", {})
+        
+        if seg_type == "reply":
+            reply_id = data.get("id", "")
+            if reply_id:
+                return f"回复消息ID: {reply_id}"
+    return ""
+
+
+def _event_text(event: dict) -> str:
+    """Extract text content from event message segments."""
     msg = event.get("message") if isinstance(event, dict) else None
     if msg is None and isinstance(event, dict):
         msg = event.get("raw_message", "")
@@ -72,22 +157,37 @@ def build_prompt(reason: str, events: list[dict]) -> str:
     events = [e for e in events if isinstance(e, dict)]
     n = len(events)
 
-    if reason in ("AT_ME", "REPLY_TO_ME"):
+    if reason in ("AT_ME", "REPLY_TO_ME", "DM_ME"):
         who = _who(events[-1]) if events else "?"
         where = _where(events[-1]) if events else "?"
         text = _event_text(events[-1]) if events else ""
-        verb = "被 @" if reason == "AT_ME" else "被回复"
+        
+        if reason == "AT_ME":
+            verb = "被 @"
+            action = "请尽快查看并回复。"
+        elif reason == "REPLY_TO_ME":
+            verb = "被回复"
+            action = "请查看并酌情回复。"
+        else:  # DM_ME
+            verb = "收到私聊"
+            action = "请尽快查看并回复。"
+        
         head = f"你在{where}{verb}了" + (f"{n}次" if n > 1 else "")
         body = f"。最近一条来自 {who}：{text}" if text else ""
-        action = "请尽快查看并回复。" if reason == "AT_ME" else "请查看并酌情回复。"
-        return f"【QQ {reason}】{head}{body}。{action}\n{_PROMPT_FOOTER}"
-
-    if reason == "DM_ME":
-        who = _who(events[-1]) if events else "?"
-        text = _event_text(events[-1]) if events else ""
-        head = "你收到一条私聊消息" + (f"（最近 {n} 条）" if n > 1 else "")
-        body = f"。来自 {who}：{text}" if text else f"，来自 {who}"
-        return f"【QQ DM_ME】{head}{body}。请尽快查看并回复。\n{_PROMPT_FOOTER}"
+        
+        # Include image metadata if present
+        image_meta = _extract_image_meta(events[-1]) if events else ""
+        reply_meta = _extract_reply_meta(events[-1]) if events else ""
+        
+        meta_parts = []
+        if image_meta:
+            meta_parts.append(f"[图片信息] {image_meta}")
+        if reply_meta:
+            meta_parts.append(f"[回复链] {reply_meta}")
+        
+        meta = "\n" + "\n".join(meta_parts) if meta_parts else ""
+        
+        return f"【QQ {reason}】{head}{body}{meta}。请尽快查看并回复。\n{_PROMPT_FOOTER}"
 
     if reason == "NEW_MESSAGE_BACKLOG":
         return f"【QQ 未读积压】有约 {n} 条未读新消息积压了一段时间，请扫一眼收件箱，酌情回复需要回复的。\n{_PROMPT_FOOTER}"
@@ -125,7 +225,7 @@ def build_prompt(reason: str, events: list[dict]) -> str:
 
     if reason == "NEW_GROUP_MEMBER":
         ids = sorted({str(e.get("user_id", "")) for e in events if e.get("user_id")})
-        return f"【QQ 新群成员】{n} 个新成员加入：{', '.join(ids)}。可酌情欢迎。"
+        return f"【QQ 新群成员】{n} 个新成员加入：{', '.join(ids)}。可酌情欢迎。\n{_PROMPT_FOOTER}"
 
     if reason == "BOT_OFFLINE":
         return "【QQ 掉线】NapCat bot 连接丢失/离线。请检查容器与登录状态。"
@@ -147,10 +247,12 @@ class WakeOrchestrator:
         log: Callable[[str], None] = lambda _msg: None,
         debounce_seconds: float = 3.0,
         cooldown_seconds: float = 30.0,
-        new_message_idle_seconds: int = 600,
+        new_message_idle_seconds: int = 300,
         legacy_command: str = "",
         legacy_session: str = "",
         wake_timeout: float = 120.0,
+        max_concurrent_wakes: int = 3,
+        immediate_min_interval: float = 5.0,
     ):
         self.waker = waker
         self.log = log
@@ -160,11 +262,14 @@ class WakeOrchestrator:
         self.legacy_command = legacy_command
         self.legacy_session = legacy_session
         self.wake_timeout = wake_timeout
+        self.max_concurrent_wakes = max_concurrent_wakes
+        self.immediate_min_interval = immediate_min_interval
 
         self._lock = threading.Lock()
         self._pending: dict[str, list[dict]] = {}
         self._timers: dict[str, threading.Timer] = {}
         self._last_wake: dict[str, float] = {}
+        self._last_immediate_wake: dict[str, float] = {}
 
         # unread-new-message tracking for backlog sweep (in-memory; best-effort)
         self._unread_since: float | None = None
@@ -174,6 +279,10 @@ class WakeOrchestrator:
         self._queue: "queue.Queue[tuple[str, str, list[dict]] | None]" = queue.Queue()
         self._worker = threading.Thread(target=self._run, name="napcat-wake-worker", daemon=True)
         self._worker.start()
+
+        # active wake tracking for concurrency limit
+        self._active_wakes: set[str] = set()
+        self._active_wakes_lock = threading.Lock()
 
     # -- public API --------------------------------------------------------
 
@@ -248,62 +357,66 @@ class WakeOrchestrator:
                 return
             now = time.time()
             if reason not in _IMMEDIATE:
-                last = self._last_wake.get(reason, 0.0)
+                last = self._last_wake.get(reason, 0)
                 if now - last < self.cooldown_seconds:
-                    self.log(f"[WAKE] suppressed reason={reason} cooldown "
-                             f"age={int(now - last)}s/{int(self.cooldown_seconds)}s buffered={len(events)}")
                     return
             self._last_wake[reason] = now
-            if reason in _MESSAGE_REASONS:
-                self._last_message_wake = now
-                # a real message wake consumes unread backlog tracking
-                self._unread_since = None
-                self._unread_count = 0
-        self._enqueue(reason, events)
-
-    def _fire_now(self, reason: str, count: int) -> None:
-        """Bypass debounce/cooldown for synthesized backlog wakes."""
-        with self._lock:
-            events = self._pending.pop(reason, []) or [{"_synthesized": True} for _ in range(count)]
-            self._last_wake[reason] = time.time()
+            self._unread_count = 0
         self._enqueue(reason, events)
 
     def _enqueue(self, reason: str, events: list[dict]) -> None:
-        prompt = build_prompt(reason, events)
-        self._queue.put((reason, prompt, events))
+        """Enqueue a wake for the worker thread."""
+        self._queue.put((reason, "", events))
+
+    def _fire_now(self, reason: str, count: int) -> None:
+        """Immediately fire a wake (bypassing debounce/cooldown) for backlog."""
+        events = [{}] * count
+        self._enqueue(reason, events)
 
     def _run(self) -> None:
         while True:
-            job = self._queue.get()
-            if job is None:
+            item = self._queue.get()
+            if item is None:
                 break
-            reason, prompt, events = job
+            reason, _ctx, events = item
+            
+            # Enforce concurrency limit for immediate reasons
+            if reason in _IMMEDIATE:
+                with self._active_wakes_lock:
+                    if len(self._active_wakes) >= self.max_concurrent_wakes:
+                        self.log(f"[WAKE] max concurrent wakes reached ({self.max_concurrent_wakes}), deferring {reason}")
+                        # re-queue with a small delay
+                        threading.Timer(0.5, lambda: self.submit(reason, events[0] if events else None)).start()
+                        self._queue.task_done()
+                        continue
+                    self._active_wakes.add(reason)
+            
             try:
-                self._do_wake(reason, prompt, events)
-            except Exception as e:  # never let the worker die
-                self.log(f"wake worker error ({reason}): {e}")
-
-    def _do_wake(self, reason: str, prompt: str, events: list[dict]) -> None:
-        idem = f"napcat-{reason}-{int(time.time())}"
-        ctx = {"reason": reason, "count": len(events)}
-        if self.waker.empty and self.legacy_command:
-            # legacy escape hatch (e.g. echo >> .agent-wake) — run as-is
-            cmd = render_wake_command(self.legacy_command, reason=reason, session=self.legacy_session)
-            self.log(f"[WAKE] deliver reason={reason} transport=legacy cmd={cmd}")
-            import subprocess
-            try:
-                r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=30)
-                self.log(f"[WAKE] deliver reason={reason} transport=legacy ok={r.returncode == 0} exit={r.returncode}")
-                _out = (r.stdout or "").strip()
-                if _out:
-                    self.log(f"[WAKE] reply reason={reason} transport=legacy: {' '.join(_out.split())[:500]}")
+                # Build prompt
+                prompt = build_prompt(reason, events)
+                # Delegate to waker
+                self.waker.wake(prompt, reason, {})
             except Exception as e:
-                self.log(f"[WAKE] deliver reason={reason} transport=legacy ok=False error={e}")
-            return
-        res = self.waker.wake(prompt, reason, ctx, idem_key=idem, timeout=self.wake_timeout)
-        self.log(f"[WAKE] deliver reason={reason} transport={res.transport} ok={res.ok} "
-                 f"elapsed={res.elapsed:.1f}s :: {res.detail}")
-        _reply = (res.extra or {}).get("reply") or ""
-        if _reply.strip():
-            self.log(f"[WAKE] reply reason={reason} transport={res.transport}: "
-                     f"{' '.join(_reply.split())[:500]}")
+                self.log(f"Wake error: {e}")
+            finally:
+                if reason in _IMMEDIATE:
+                    with self._active_wakes_lock:
+                        self._active_wakes.discard(reason)
+                self._queue.task_done()
+    def _enqueue(self, reason: str, events: list[dict]) -> None:
+        """Enqueue a wake for the worker thread."""
+        self._queue.put((reason, "", events))
+
+    def _fire_now(self, reason: str, count: int) -> None:
+        """Immediately fire a wake (bypassing debounce/cooldown) for backlog."""
+        events = [{}] * count
+        self._enqueue(reason, events)
+
+
+# Module exports
+__all__ = [
+    "WakeOrchestrator",
+    "build_prompt",
+    "_IMMEDIATE",
+    "_MESSAGE_REASONS",
+]

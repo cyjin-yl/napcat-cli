@@ -38,12 +38,28 @@ def format_message(msg: list[dict[str, Any]]) -> str:
             if qq:
                 parts.append(f"@{qq}")
         elif seg_type == "image":
-            # Image: file path, summary, url
+            # Image: file path, summary, url, file_id, sub_type
             summary = data.get("summary", "").strip()
+            file_id = data.get("file", "") or data.get("file_id", "")
+            url = data.get("url", "")
+            sub_type = data.get("sub_type", "")
+            file_size = data.get("file_size", "")
+            
+            parts.append("[图片")
+            details = []
             if summary:
-                parts.append(f"[图片: {summary}]")
-            else:
-                parts.append("[图片]")
+                details.append(f"摘要: {summary}")
+            if file_id:
+                details.append(f"file_id: {file_id}")
+            if url:
+                details.append(f"url: {url}")
+            if sub_type:
+                details.append(f"sub_type: {sub_type}")
+            if file_size:
+                details.append(f"size: {file_size}")
+            if details:
+                parts.append(" " + ", ".join(details))
+            parts.append("]")
         elif seg_type == "record":
             # Voice/audio: file, path, url
             parts.append("[语音]")
@@ -85,7 +101,7 @@ def extract_files(msg: list[dict[str, Any]], base_dir: str | None = None) -> lis
         data = seg.get("data", {})
 
         # Look for file, path, or url fields
-        for key in ("file", "path"):
+        for key in ("file", "path", "url"):
             path_str = data.get(key, "")
             if path_str:
                 p = Path(path_str)
@@ -93,7 +109,7 @@ def extract_files(msg: list[dict[str, Any]], base_dir: str | None = None) -> lis
                     p = Path(base_dir) / p
                 if p.exists():
                     files.append(p)
-                    break  # Prefer file over path
+                    break  # Prefer file over path over url
 
     return files
 
@@ -122,7 +138,7 @@ def extract_file_paths(msg: list[dict[str, Any]]) -> list[str]:
     """Extract file path strings from image/video/record segments.
 
     Returns all file paths referenced in the message, regardless of whether
-    the files exist. Useful for establishing message→file mapping.
+    the files exist. Useful for establishing message->file mapping.
 
     Args:
         msg: NapCat message segments
@@ -139,11 +155,11 @@ def extract_file_paths(msg: list[dict[str, Any]]) -> list[str]:
         data = seg.get("data", {})
 
         if seg_type in ("image", "record", "video"):
-            for key in ("file", "path"):
+            for key in ("file", "path", "url"):
                 path_str = data.get(key, "")
                 if path_str:
                     files.append(path_str)
-                    break  # Prefer file over path
+                    break  # Prefer file over path over url
 
     return files
 

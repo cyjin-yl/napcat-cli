@@ -93,18 +93,38 @@ docs), with `Authorization: Bearer <key>` and an `Idempotency-Key` header.
 
 ### Event routing
 
-| Trigger | Behavior |
-|---------|----------|
-| `AT_ME`, `REPLY_TO_ME`, `DM_ME` | Near-immediate wake (cooldown bypassed), with who/where/text in the prompt. `DM_ME` fires on any private (DM) message. |
-| `GROUP_TRIGGER` | Debounced wake (group trigger-word match; private messages wake via `DM_ME` instead) |
-| `NEW_MESSAGE` (not @) | Tracked, not woken; if unread longer than `wake_new_message_idle_seconds` → a `NEW_MESSAGE_BACKLOG` wake |
-| `NEW_FRIEND`, `NEW_REQUEST`, `BOT_BANNED`, `NEW_POKE`, `GROUP_ADMIN_CHANGE`, `NEW_GROUP_MEMBER`, `BOT_OFFLINE`, … | Debounced + cooldown-bounded wake so the agent perceives them within a reasonable window |
-
-Debounce (`wake_debounce_seconds`, default 3) coalesces a burst into one wake;
-cooldown (`wake_cooldown_seconds`, default 30) suppresses repeats. Every wake is
-logged to `daemon.log` as `[WAKE] trigger / queued / deliver / reply` lines
-(including transport, elapsed time, and the agent's reply), and `daemon.log` is
-size-rotated (2 MB × 5) so it can't fill the disk.
+### Event routing
+96:
+97:| Trigger | Behavior |
+98:|---------|----------|
+99:| `AT_ME`, `REPLY_TO_ME`, `DM_ME` | Near-immediate wake (cooldown bypassed), with who/where/text in the prompt. `DM_ME` fires on any private (DM) message. **Wake prompt includes image metadata (file_id, url, sub_type, size), reply chain (reply message ID), and skill hints for OCR/image download.** |
+99:| `GROUP_TRIGGER` | Debounced wake (group trigger-word match; private messages wake via `DM_ME` instead) |
+100:| `NEW_MESSAGE` (not @) | Tracked, not woken; if unread longer than `wake_new_message_idle_seconds` → a `NEW_MESSAGE_BACKLOG` wake |
+102:| `NEW_FRIEND`, `NEW_REQUEST`, `BOT_BANNED`, `NEW_POKE`, `GROUP_ADMIN_CHANGE`, `NEW_GROUP_MEMBER`, `BOT_OFFLINE`, … | Debounced + cooldown-bounded wake so the agent perceives them within a reasonable window |
+103:
+103:Debounce (`wake_debounce_seconds`, default 3) coalesces a burst into one wake;
+104:cooldown (`wake_cooldown_seconds`, default 30) suppresses repeats. Every wake is
+105:logged to `daemon.log` as `[WAKE] trigger / queued / deliver / reply` lines
+106:(including transport, elapsed time, and the agent's reply), and `daemon.log` is
+106:size-rotated (2 MB × 5) so it can't fill the disk.
+108:
+108:### Image & OCR Capabilities
+109:
+109:The wake prompt automatically includes image metadata when an image message is received:
+109:- `file_id` — 图片文件 ID
+109:- `url` — 图片下载链接
+109:- `sub_type` — 图片类型 (0=普通, 1=动画表情, 7=赞/点赞)
+109:- `file_size` — 文件大小（字节）
+109:- `summary` — 图片摘要/描述
+109:- `reply_id` — 回复消息 ID（用于追踪回复链）
+109:
+109:Agent can use these skills via skills-fs:
+109:- `/napcat/ocr` — OCR 识图 (支持 file:///path、URL、base64)
+110:- `/napcat/get_image` — 下载图片 (输入 JSON `{"url": "..."}`)
+110:- `/napcat/ocr` — OCR 识图 (支持 file:///path、URL、base64)
+111:- `/napcat/groups/:group_id/:time_range/:message_id/:content` — 获取消息媒体内容
+111:- `/napcat/groups/:group_id/send/image` — 发送图片
+111:- `/napcat/friends/:user_id/send/image` — 发送私聊图片
 
 ### Configure
 

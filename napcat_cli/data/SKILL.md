@@ -172,14 +172,115 @@ Use `--non-interactive` to skip all prompts (uses defaults). Use `--yes` to auto
 
 ## Agent Wake (`napcat wake`)
 
-The daemon wakes you (the agent) automatically when notable QQ events arrive —
-you don't usually call this yourself. Each wake carries a **contextual prompt**
-that already tells you *what* happened (who @'d you, in which group, the message
 text, counts), so read the prompt before re-querying.
-
-- `AT_ME` / `REPLY_TO_ME` / `DM_ME` wake you near-immediately and bypass cooldown —
-  these expect a prompt reply (`DM_ME` = someone sent you a private/DM message).
-  Use `napcat reply <id>` or `napcat send`.
+179:
+180:- `AT_ME` / `REPLY_TO_ME` / `DM_ME` wake you near-immediately and bypass cooldown —
+181:  these expect a prompt reply (`DM_ME` = someone sent you a private/DM message).
+182:  Use `napcat reply <id>` or `napcat send`/`napcat reply` 回复。
+183:- `NEW_MESSAGE_BACKLOG` means unread messages piled up — scan `napcat events` /
+184:  `napcat alerts` 和回复。
+185:
+186:## 图片与 OCR 技能使用指南
+186:
+187:### 图片消息识别
+187:当收到图片消息时，Wake prompt 会自动包含图片元数据：
+187:- `file_id`: 图片文件 ID，可用于下载
+187:- `url`: 图片下载链接
+187:- `sub_type`: 图片类型（0=普通图片, 1=动画表情, 7=赞/点赞等）
+187:- `file_size`: 文件大小（字节）
+187:- `summary`: 图片摘要/描述（如有）
+187:- `url`: 图片下载链接
+187:
+187:### 可用技能：图片处理
+187:- **下载图片**: 写入 `/napcat/get_image` 文件，内容为 JSON `{"url": "图片URL"}`，即可下载图片到本地
+187:- **OCR 识图**: 写入 `/napcat/ocr` 文件，内容为 JSON `{"image": "file:///path/to/image.png"}` 或 `{"image": "https://example.com/img.jpg"}` 或 `{"image": "base64数据"}`，即可进行 OCR 识别
+187:- **获取消息媒体内容**: 读取 `/napcat/groups/:group_id/:time_range/:message_id/:content` 可获取消息中的媒体内容（图片/视频/文件）
+187:- **回复图片消息**: 写入 `/napcat/groups/:group_id/:time_range/:message_id/reply/image`，内容为本地图片路径
+187:- **发送图片**: 写入 `/napcat/groups/:group_id/send/image` 或 `/napcat/friends/:user_id/send/image`，内容为本地图片路径
+187:
+187:### 回复链追踪
+187:当消息包含 `reply` 段时，Wake prompt 会包含 `[回复链] 回复消息ID: xxx`。
+187:可通过 `/napcat/groups/:group_id/:time_range/:message_id` 查看被回复消息的详细内容。
+187:
+187:### 最佳实践
+187:1. **收到图片消息**: 先读取 `url` 或 `file_id`，如需识别文字请用 `/napcat/ocr`
+187:2. **追踪回复链**: 看到 `[回复链] 回复消息ID: xxx` 时，可读取对应消息上下文
+187:3. **下载图片**: 写入 `/napcat/get_image` 配合 `url` 参数
+187:4. **OCR 识图**: 支持本地文件 `file:///path`、URL、base64 格式
+187:4. **发送/回复图片**: 使用 `/napcat/groups/:group_id/send/image` 或 `/napcat/friends/:user_id/send/image`
+187:
+187:### Wake Prompt 中的图片信息格式
+187:Wake prompt 中会自动包含类似信息：
+187:`[图片信息] [图片: 摘要: 测试, file_id: abc.jpg, url: http://example.com/img.jpg, sub_type: 0, size: 12345]`
+187:
+187:### 回复链信息格式
+187:回复链信息会显示：
+187:`[回复链] 回复消息ID: 12345`
+187:
+187:Agent 遇到图片消息时，应主动考虑：
+187:1. 是否需要 OCR 识别文字内容？
+187:2. 是否需要下载图片进行视觉分析？
+187:3. 是否有回复链需要追踪上下文？
+187:4. 是否需要下载图片进行进一步处理？
+187:
+187:---
+187:
+187:## TUI 图片显示（实验性）
+187:配置 `tui.show_images: true` 可在 TUI 中显示图片预览（需终端支持图片协议，如 Kitty、iTerm2、WezTerm）。
+187:配置示例：
+187:```yaml
+187:tui:
+187:  show_images: true
+187:```
+187:
+187:---
+187:
+187:## TUI 快捷键
+187:| 快捷键 | 功能 |
+187:|--------|------|
+187:| `Escape` | 退出/返回 |
+187:| `F5` | 刷新 |
+187:| `Up/Down` | 上/下翻页 |
+187:| `PageUp/PageDown` | 翻页 |
+187:| `Enter` | 打开聊天/发送消息 |
+187:| `Tab` | 命令补全 |
+187:
+187:## 技能开发
+187:技能目录结构：
+187:```
+187:skill_name/
+187:├── SKILL.md        # 技能说明（必需）
+187:├── main.py         # 入口脚本（可选）
+187:└── requirements.txt # 依赖（可选）
+187:```
+187:
+187:技能通过 `skills-fs` 挂载到 `/napcat/skills/` 目录，Agent 可直接读取和执行。
+187:
+187:---
+187:
+187:## 常见问题
+187:Q: 为什么收到图片消息只显示 `[图片]`？
+187:A: 旧版本只显示 `[图片]`，新版本会自动包含 `file_id`、`url`、`sub_type`、`file_size` 等元数据。请确保使用最新版本。
+187:
+187:Q: 如何识别图片中的文字？
+187:A: 使用 `/napcat/ocr` 技能，写入 JSON `{"image": "file:///path/to/image.png"}` 或 `{"image": "https://example.com/img.jpg"}`。
+187:
+187:Q: 如何下载图片？
+187:A: 写入 `/napcat/get_image`，内容为 `{"url": "图片URL"}`。
+187:
+187:Q: 如何追踪回复链？
+187:A: Wake prompt 中会显示 `[回复链] 回复消息ID: xxx`，可通过 skills-fs 读取对应消息。
+187:
+187:Q: 为什么会有大量 wake up？
+187:A: AT_ME/DM_ME/REPLY_TO_ME 绕过冷却，可能导致频繁唤醒。可在配置中调整 `debounce_seconds` 和 `cooldown_seconds`。
+187:
+187:---
+187:
+187:## 版本历史
+187:- v2.1.0: 新增 DM_ME 唤醒理由，支持私聊立即唤醒
+187:- v2.1.0: Wake prompt 包含图片元数据、回复链、技能提示
+187:- v2.1.0: 新增 skills-fs 挂载点 `/napcat/get_image` (下载)、`/napcat/ocr` (OCR)
+187:
 - `NEW_MESSAGE_BACKLOG` means unread messages piled up — scan `napcat events` /
   `napcat alerts` and reply to anything worth replying to.
 - Other events (`NEW_FRIEND`, `NEW_REQUEST`, `BOT_BANNED`, `NEW_POKE`, …) are
