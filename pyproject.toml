@@ -15,9 +15,7 @@ dependencies = ["textual>=0.40"]
 napcat = "napcat_cli.cli:main"
 
 [project.optional-dependencies]
-dev = ["pytest>=7"]
-fs = ["napcat-cli-fs>=2.0.0"]
-all = ["napcat-cli[fs]"]
+dev = ["pytest>=7", "pyflakes>=3.0"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["napcat_cli"]

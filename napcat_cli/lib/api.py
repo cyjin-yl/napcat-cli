@@ -21,9 +21,9 @@ class NapCatAPI:
         self.token = token or os.environ.get("NAPCAT_TOKEN") or cfg.token
         self.timeout = timeout if timeout is not None else 30
         self.echo_counter = 0
+        self._online_cache: dict = {}
 
         # Load or create API availability cache
-        self._load_api_cache()
 
     def _load_api_cache(self) -> None:
         """Load API availability cache from disk. No probe — cache is built lazily."""

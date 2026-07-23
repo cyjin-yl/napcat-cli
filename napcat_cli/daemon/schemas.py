@@ -325,9 +325,18 @@ ACTION_SCHEMAS: dict[str, dict] = {
     # ------------------------------------------------------------------
     "send_group_text": {
         "params": ["group_id"],
-        "example": {"group_id": "123456", "text": "hello"},
+        "example": {"group_id": "123456", "text": "hello [CQ:at,qq=123]"},
         "required": ["group_id"],
-        "description": "Send plain text to a group. Write raw text to the file.",
+        "description": ("Send smart text to a group. Auto-recognises CQ codes "
+                        "(e.g. [CQ:at,qq=123], [CQ:image,...], [CQ:face,...]) and dispatches "
+                        "as segments. Plain text without CQ codes is sent as a plain text segment."),
+    },
+    "send_group_text_raw": {
+        "params": ["group_id"],
+        "example": {"group_id": "123456", "text": "raw text only"},
+        "required": ["group_id"],
+        "description": ("Send raw plain text to a group. CQ codes are emitted literally (no parsing). "
+                        "Use /text if you want CQ codes processed, or /cqcode for typed CQ string."),
     },
     "send_group_image": {
         "params": ["group_id"],
@@ -361,9 +370,18 @@ ACTION_SCHEMAS: dict[str, dict] = {
     },
     "send_private_text": {
         "params": ["user_id"],
-        "example": {"user_id": "12345678", "text": "hello"},
+        "example": {"user_id": "12345678", "text": "hello [CQ:at,qq=123]"},
         "required": ["user_id"],
-        "description": "Send plain text to a friend. Write raw text to the file.",
+        "description": ("Send smart text to a friend. Auto-recognises CQ codes "
+                        "(e.g. [CQ:at,qq=123], [CQ:image,...], [CQ:face,...]) and dispatches "
+                        "as segments. Plain text without CQ codes is sent as a plain text segment."),
+    },
+    "send_private_text_raw": {
+        "params": ["user_id"],
+        "example": {"user_id": "12345678", "text": "raw text only"},
+        "required": ["user_id"],
+        "description": ("Send raw plain text to a friend. CQ codes are emitted literally (no parsing). "
+                        "Use /text if you want CQ codes processed, or /cqcode for typed CQ string."),
     },
     "send_private_image": {
         "params": ["user_id"],
@@ -397,9 +415,19 @@ ACTION_SCHEMAS: dict[str, dict] = {
     },
     "reply_group_text": {
         "params": ["group_id", "message_id"],
-        "example": {"group_id": "123456", "message_id": "987654321", "text": "reply"},
+        "example": {"group_id": "123456", "message_id": "987654321", "text": "reply [CQ:at,qq=123]"},
         "required": ["group_id", "message_id"],
-        "description": "Reply to a group message with plain text.",
+        "description": ("Reply to a group message with smart text. Auto-recognises CQ codes "
+                        "(e.g. [CQ:at,qq=123], [CQ:image,...], [CQ:face,...]) and dispatches "
+                        "as segments. Plain text without CQ codes is sent as a plain text segment."),
+    },
+    "reply_group_text_raw": {
+        "params": ["group_id", "message_id"],
+        "example": {"group_id": "123456", "message_id": "987654321", "text": "raw reply"},
+        "required": ["group_id", "message_id"],
+        "description": ("Reply to a group message with raw plain text. CQ codes are emitted literally "
+                        "(no parsing). Use /text if you want CQ codes processed, or /cqcode for typed "
+                        "CQ string."),
     },
     "reply_group_image": {
         "params": ["group_id", "message_id"],
@@ -433,9 +461,19 @@ ACTION_SCHEMAS: dict[str, dict] = {
     },
     "reply_private_text": {
         "params": ["user_id", "message_id"],
-        "example": {"user_id": "12345678", "message_id": "987654321", "text": "reply"},
+        "example": {"user_id": "12345678", "message_id": "987654321", "text": "reply [CQ:at,qq=123]"},
         "required": ["user_id", "message_id"],
-        "description": "Reply to a friend message with plain text.",
+        "description": ("Reply to a friend message with smart text. Auto-recognises CQ codes "
+                        "(e.g. [CQ:at,qq=123], [CQ:image,...], [CQ:face,...]) and dispatches "
+                        "as segments. Plain text without CQ codes is sent as a plain text segment."),
+    },
+    "reply_private_text_raw": {
+        "params": ["user_id", "message_id"],
+        "example": {"user_id": "12345678", "message_id": "987654321", "text": "raw reply"},
+        "required": ["user_id", "message_id"],
+        "description": ("Reply to a friend message with raw plain text. CQ codes are emitted literally "
+                        "(no parsing). Use /text if you want CQ codes processed, or /cqcode for typed "
+                        "CQ string."),
     },
     "reply_private_image": {
         "params": ["user_id", "message_id"],

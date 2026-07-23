@@ -26,6 +26,7 @@ import urllib.parse
 import urllib.request
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from typing import Any
 
 from .wake import render_wake_command
 
@@ -296,12 +297,21 @@ class CliWakeBackend(WakeBackend):
         return bool(self.command_template)
 
     def render(self, prompt: str, reason: str) -> str:
+        """Render for dry-run/backward compat - uses {prompt} placeholder."""
         return render_wake_command(self.command_template, reason=reason, prompt=prompt, session=self.session)
+
+    def _render_file(self, prompt: str, reason: str) -> str:
+        """Render for actual execution - uses {prompt_file} placeholder with temp file."""
+        import tempfile
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+            f.write(prompt)
+            prompt_file = f.name
+        return render_wake_command(self.command_template, reason=reason, prompt_file=prompt_file, session=self.session)
 
     def wake(self, prompt, reason, ctx, idem_key, *, dry_run=False, timeout=30.0) -> WakeResult:
         if not self.configured():
             return WakeResult(False, "cli", "not configured (command_template required)")
-        cmd = self.render(prompt, reason)
+        cmd = self._render_file(prompt, reason) if not dry_run else self.render(prompt, reason)
         if dry_run:
             return WakeResult(True, "cli", f"[dry-run] {cmd}")
         start = time.monotonic()

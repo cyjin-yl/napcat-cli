@@ -25,6 +25,7 @@ def render_wake_command(
     *,
     reason: str = "",
     prompt: str = "",
+    prompt_file: str = "",
     session: str = "",
 ) -> str:
     """Render a wake command template with shlex-quoted placeholders."""
@@ -32,12 +33,14 @@ def render_wake_command(
         return ""
     q_reason = _q(reason)
     q_prompt = _q(prompt)
+    q_prompt_file = _q(prompt_file)
     q_session = _q(session)
     return (
         template.replace("$REASON", q_reason)
         .replace("${REASON}", q_reason)
         .replace("{reason}", q_reason)
         .replace("{prompt}", q_prompt)
+        .replace("{prompt_file}", q_prompt_file)
         .replace("{session}", q_session)
     )
 

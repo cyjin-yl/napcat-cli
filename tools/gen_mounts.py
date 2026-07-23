@@ -16,10 +16,8 @@ import sys
 from pathlib import Path
 
 # Load ACTION_SCHEMAS from daemon/
-sys.path.insert(0, str(Path(__file__).parent.parent / "daemon"))
-from schemas import ACTION_SCHEMAS  # noqa: E402
-
-
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from napcat_cli.daemon.schemas import ACTION_SCHEMAS  # noqa: E402
 def schema_json(action):
     """Return the JSON string for a schema entry."""
     s = ACTION_SCHEMAS.get(action, {})
@@ -108,6 +106,7 @@ FRIEND_OPS = [
 # ---------------------------------------------------------------------------
 GROUP_SEND_OPS = [
     ("text", "send_group_text", "raw"),
+    ("text_raw", "send_group_text_raw", "raw"),
     ("image", "send_group_image", "raw"),
     ("file", "send_group_file", "raw"),
     ("cqcode", "send_group_cqcode", "raw"),
@@ -115,9 +114,9 @@ GROUP_SEND_OPS = [
     ("json", "send_group_json", "json"),
 ]
 
-# Per-friend send operations (under friends/:user_id/send/)
 FRIEND_SEND_OPS = [
     ("text", "send_private_text", "raw"),
+    ("text_raw", "send_private_text_raw", "raw"),
     ("image", "send_private_image", "raw"),
     ("file", "send_private_file", "raw"),
     ("cqcode", "send_private_cqcode", "raw"),
@@ -125,9 +124,9 @@ FRIEND_SEND_OPS = [
     ("json", "send_private_json", "json"),
 ]
 
-# Reply operations — same structure, different actions
 GROUP_REPLY_OPS = [
     ("text", "reply_group_text", "raw"),
+    ("text_raw", "reply_group_text_raw", "raw"),
     ("image", "reply_group_image", "raw"),
     ("file", "reply_group_file", "raw"),
     ("cqcode", "reply_group_cqcode", "raw"),
@@ -137,6 +136,7 @@ GROUP_REPLY_OPS = [
 
 FRIEND_REPLY_OPS = [
     ("text", "reply_private_text", "raw"),
+    ("text_raw", "reply_private_text_raw", "raw"),
     ("image", "reply_private_image", "raw"),
     ("file", "reply_private_file", "raw"),
     ("cqcode", "reply_private_cqcode", "raw"),

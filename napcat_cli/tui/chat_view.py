@@ -424,6 +424,35 @@ class ChatViewScreen(Screen):
         prefix_name = "我" if is_self else sender_name
         prefix_style = "green" if is_self else "blue"
 
+        # Append image paths when config enabled
+        show_images = True
+        try:
+            from napcat_cli.lib.config import get_config
+            cfg = get_config()
+            show_images = bool(getattr(cfg, 'tui_show_images', True))
+        except Exception:
+            pass
+
+        if show_images and isinstance(msg, list):
+            for seg in msg:
+                if isinstance(seg, dict) and seg.get("type") == "image":
+                    data = seg.get("data", {}) or {}
+                    url = data.get("url", "")
+                    file_id = data.get("file_id", "")
+                    sub_type = data.get("sub_type", "")
+                    file_size = data.get("file_size", "")
+                    summary = data.get("summary", "")
+                    extras = [s for s in (url, file_id) if s]
+                    if file_size:
+                        try:
+                            extras.append(f"{int(file_size) // 1024}KB")
+                        except (ValueError, TypeError):
+                            pass
+                    if summary:
+                        extras.append(summary)
+                    if extras:
+                        content += f"\n [图片: {' | '.join(extras)}]"
+
         return Text.assemble(
             (f"[{prefix_name}] ", prefix_style),
             (time_str, ""),

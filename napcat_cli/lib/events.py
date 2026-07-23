@@ -82,6 +82,7 @@ class EventsReader:
         group_id: int | None = None,
         user_id: int | None = None,
         keyword: str | None = None,
+        mark_seen: bool = True,
     ) -> list[dict[str, Any]]:
         """Read events from SQLite, newest first.
 
@@ -93,6 +94,7 @@ class EventsReader:
             group_id: Filter by group_id.
             user_id: Filter by user_id or sender_id.
             keyword: Filter by keyword in raw_json (LIKE query).
+            mark_seen: If True (default), mark returned events as seen (auto-set when read via API/CLI/FS).
         """
         conn = self._get_conn()
         return read_events(
@@ -104,6 +106,7 @@ class EventsReader:
             group_id=group_id,
             user_id=user_id,
             keyword=keyword,
+            mark_seen=mark_seen,
         )
 
     def read_alerts(
@@ -115,11 +118,96 @@ class EventsReader:
         conn = self._get_conn()
         return read_alerts(conn, name=name, limit=limit)
 
-    def get_count(self) -> int:
-        """Get total event count."""
-        from .events_sqlite import get_event_count
+    def mark_seen(self, event_ids: list[int]) -> int:
+        """Mark events as seen (auto-set when read via API/CLI/FS).
+
+        Returns count of events updated.
+        """
+        if not event_ids:
+            return 0
         conn = self._get_conn()
-        return get_event_count(conn)
+        placeholders = ",".join("?" * len(event_ids))
+        cur = conn.execute(
+            f"UPDATE events SET seen = 1 WHERE id IN ({placeholders}) AND seen = 0",
+            event_ids,
+        )
+        conn.commit()
+        return cur.rowcount
+
+    def mark_read(self, event_ids: list[int]) -> int:
+        """Mark events as read (explicit user/Agent action).
+
+        Also sets read_timestamp to current time.
+        Returns count of events updated.
+        """
+        if not event_ids:
+            return 0
+        import time
+        now = int(time.time())
+        conn = self._get_conn()
+        placeholders = ",".join("?" * len(event_ids))
+        cur = conn.execute(
+            f"UPDATE events SET read_timestamp = ?, seen = 1 WHERE id IN ({placeholders})",
+            [int(time.time())] + event_ids,
+        )
+        conn.commit()
+        return cur.rowcount
+
+    def mark_read_up_to(self, group_id: int | None, user_id: int | None, timestamp: int) -> int:
+        """Mark all events up to timestamp as read for a conversation.
+
+        If group_id is given, marks group messages.
+        If user_id is given, marks private messages.
+        Both can be None to mark all.
+
+        Returns count of events updated.
+        """
+        import time
+        now = int(time.time())
+        conn = self._get_conn()
+        where = ["read_timestamp IS NULL", "timestamp <= ?"]
+        params = [timestamp]
+        if group_id is not None:
+            where.append("group_id = ?")
+            params.append(group_id)
+        if user_id is not None:
+            where.append("user_id = ?")
+            params.append(user_id)
+        cur = conn.execute(
+            f"UPDATE events SET read_timestamp = ?, seen = 1 WHERE {' AND '.join(where)}",
+            [int(time.time())] + params,
+        )
+        conn.commit()
+        return cur.rowcount
+
+    def get_unread_count(self, group_id: int | None = None, user_id: int | None = None) -> int:
+        """Get count of unread (not read) events for a conversation."""
+        conn = self._get_conn()
+        where = ["read_timestamp IS NULL"]
+        params = []
+        if group_id is not None:
+            where.append("group_id = ?")
+            params.append(group_id)
+        if user_id is not None:
+            where.append("user_id = ?")
+            params.append(user_id)
+        cur = conn.execute(
+            f"SELECT COUNT(*) FROM events WHERE {' AND '.join(where)}",
+            params,
+        )
+        return cur.fetchone()[0]
+
+    def get_seen_status(self, event_ids: list[int]) -> dict[int, bool]:
+        """Get seen status for a list of event IDs."""
+        if not event_ids:
+            return {}
+        conn = self._get_conn()
+        placeholders = ",".join("?" * len(event_ids))
+        cur = conn.execute(
+            f"SELECT id, seen FROM events WHERE id IN ({','.join('?' * len(event_ids))})",
+            event_ids,
+        )
+        return {row[0]: bool(row[1]) for row in cur.fetchall()}
 
     def close(self) -> None:
         if self._conn is not None:

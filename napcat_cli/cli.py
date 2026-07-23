@@ -517,7 +517,21 @@ def cmd_alerts(args: argparse.Namespace, api: NapCatAPI) -> int:
         print(f"All alerts cleared ({count} removed)", file=sys.stderr)
         return 0
 
-    alerts = reader.read_alerts()
+    alerts = reader.read_alerts(limit=args.limit)
+    if not alerts:
+        print("No pending alerts", file=sys.stderr)
+        return 0
+
+    if getattr(args, "subcommand", None) == "mark-read":
+        # Mark specific alerts as read (by event_ids)
+        event_ids = getattr(args, "event_ids", [])
+        if not event_ids:
+            print("No event_ids provided for mark-read", file=sys.stderr)
+            return 1
+        count = reader.mark_read(event_ids)
+        print(f"Marked {count} events as read", file=sys.stderr)
+        return 0
+
     if not alerts:
         print("No pending alerts", file=sys.stderr)
         return 0
@@ -674,14 +688,30 @@ def cmd_ocr(args: argparse.Namespace, api: NapCatAPI) -> int:
         else:
             print(f"Error: image file not found: {args.image}", file=sys.stderr)
             return 1
+    # Try NapCat OCR first
     result = api.call("ocr_image", image=image_path)
     if result.get("retcode") != 0:
         msg = result.get("message", "")
         if "not supported" in str(msg).lower() or "not exist" in str(msg).lower():
-            print(f"Error: OCR is not supported by this NapCat instance: {msg}", file=sys.stderr)
+            # Fallback to local PaddleOCR
+            print(f"NapCat OCR unavailable ({msg}), falling back to local PaddleOCR...", file=sys.stderr)
+            from napcat_cli.lib.ocr import ocr_file
+            # Extract actual path from file:// or use URL directly
+            if image_path.startswith("file://"):
+                local_path = image_path[7:]
+            else:
+                local_path = image_path
+            text = ocr_file(local_path)
+            if text is None:
+                print("Error: Local PaddleOCR also failed", file=sys.stderr)
+                return 1
+            result = {"retcode": 0, "message": "OK", "data": {"text": text}}
+            print(json.dumps({"retcode": 0, "message": "OK", "data": {"text": text}}, indent=2, ensure_ascii=False))
+            return 0
         else:
             print(f"Error: OCR failed: {msg}", file=sys.stderr)
-    print(json.dumps(result, indent=2, ensure_ascii=False))
+    else:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
     return 0 if result.get("retcode") == 0 else 1
 
 
@@ -965,11 +995,12 @@ def cmd_phone(args: argparse.Namespace, api: NapCatAPI) -> int:
     if hasattr(args, "phone_subcommand") and args.phone_subcommand:
         subcmd = args.phone_subcommand
         if subcmd == "status":
-            return cmd_status(args)
+            return cmd_status(args, api)
         elif subcmd == "config":
-            return cmd_config_show(args)
+            args.subcommand = "show"
+            return cmd_config(args, api)
         elif subcmd == "alerts":
-            return cmd_alerts_check(args)
+            return cmd_alerts(args, api)
         elif subcmd == "events":
             limit = getattr(args, "limit", 50)
             no_hb = getattr(args, "no_heartbeat", False)
@@ -1601,9 +1632,13 @@ def main() -> int:
 
     # --- alerts ---
     alerts_p = subparsers.add_parser("alerts", help="Check or clear alerts")
+    alerts_p.add_argument("--limit", "-n", type=int, default=30, help="Max alerts to show")
     alerts_sub = alerts_p.add_subparsers(dest="subcommand")
-    alerts_sub.add_parser("check", help="Show pending alerts")
+    alerts_check = alerts_sub.add_parser("check", help="Show pending alerts")
+    alerts_check.add_argument("--limit", "-n", type=int, default=30, help="Max alerts to show")
     ac = alerts_sub.add_parser("clear", help="Clear all alerts")
+    am = alerts_sub.add_parser("mark-read", help="Mark events as read")
+    am.add_argument("event_ids", nargs="+", type=int, help="Event IDs to mark as read")
 
     # --- config ---
     config_p = subparsers.add_parser("config", help="Manage configuration")

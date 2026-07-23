@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""NapCat Watch Daemon — NapCat WS listener + skills-fs HTTP provider.
+"""NapCat Watch Daemon -- NapCat WS listener + skills-fs HTTP provider.
 
 Connects to NapCat's WebSocket server to receive real-time events,
 writes them to the filesystem bridge, and generates alert files.
@@ -10,20 +10,14 @@ so skills-fs can query events and proxy NapCat API calls.
 Alert files generated:
 - NAPCAT_CLI_NEW_MESSAGE: Any new message received
 - NAPCAT_CLI_AT_ME: Bot was @mentioned
-- NAPCAT_CLI_DM_ME: Private (DM) message received — wakes the agent at AT_ME level
-- NAPCAT_CLI_REPLY_TO_ME: Reply to bot's message
-- NAPCAT_CLI_NEW_POKE: Poke received
-- NAPCAT_CLI_NEW_REQUEST: Friend/group join request
-- NAPCAT_CLI_NEED_WAKE_UP: Composite alert - agent should check
-
+- NAPCAT_CLI_DM_ME: Private (DM) message received -- wakes the agent at AT_ME level
 The daemon connects via WebSocket to the NapCat server.
 """
-from __future__ import annotations
-
 import asyncio
 import json
 import logging
 import os
+import re
 import signal
 import sys
 import time
@@ -54,7 +48,7 @@ def _make_rotating_logger(path: Path, max_bytes: int = 2_000_000, backup_count: 
     """A per-data-dir logger writing to ``path`` with size-based rotation.
 
     Keeps daemon.log bounded: at ~2 MB it rolls to daemon.log.1 .. daemon.log.5
-    (olest deleted), so it can never fill the disk. Idempotent — re-creating it
+    (oldest deleted), so it can never fill the disk. Idempotent -- re-creating it
     for the same path does not stack duplicate handlers.
     """
     logger = logging.getLogger(f"napcat.daemon.{path.parent.name}")
@@ -104,7 +98,7 @@ class EventProcessor:
     def __init__(self, data_dir: Path, self_id: str = "", wake_command: str = "", wake_on_event: bool = True, *, group_trigger_word: str = "", private_trigger: str = "",
                  waker=None, orchestrator=None,
                  debounce_seconds: float = 3.0, cooldown_seconds: float = 30.0,
-                 new_message_idle_seconds: int = 600):
+                 new_message_idle_seconds: int = 600, wake_timeout: float = 300.0):
         self.writer = EventsWriter(data_dir)
         self.self_id = self_id
         self.wake_command = wake_command
@@ -123,6 +117,7 @@ class EventProcessor:
                 waker, log=self.log,
                 debounce_seconds=debounce_seconds, cooldown_seconds=cooldown_seconds,
                 new_message_idle_seconds=new_message_idle_seconds,
+                wake_timeout=wake_timeout,
                 legacy_command=wake_command)
         else:
             self.orchestrator = None
@@ -134,17 +129,21 @@ class EventProcessor:
             pass
 
     def process(self, event: dict) -> None:
-        row_id = self.writer.write_event(event)
-        self.log(f"Event: row_id={row_id}")
-        post_type = event.get("post_type", "")
-        if post_type == "message":
-            self._handle_message(event)
-        elif post_type == "notice":
-            self._handle_notice(event)
-        elif post_type == "request":
-            self._handle_request(event)
-        elif post_type == "meta_event":
-            self._handle_meta(event)
+        try:
+            row_id = self.writer.write_event(event)
+            self.log(f"Event: row_id={row_id}")
+            post_type = event.get("post_type", "")
+            if post_type == "message":
+                self._handle_message(event)
+            elif post_type == "notice":
+                self._handle_notice(event)
+            elif post_type == "request":
+                self._handle_request(event)
+            elif post_type == "meta_event":
+                self._handle_meta(event)
+        except Exception as e:
+            import traceback
+            self.log(f"process() ERROR: {e}\n{traceback.format_exc()}")
 
     def _handle_message(self, event: dict) -> None:
         msg_type = event.get("message_type", "")
@@ -166,43 +165,80 @@ class EventProcessor:
             "time": event.get("time", 0),
         })
         # Track unread messages for the backlog sweep (NEW_MESSAGE itself does
-        # not wake; the sweep wakes the agent if they pile up unread).
-        if self.orchestrator is not None:
-            self.orchestrator.note_new_message(event.get("time") or time.time())
+        # Extract message segments for AT detection
+        msg_segments = event.get("message", [])
 
         is_at_me = False
         if self.self_id:
             raw_str = str(raw_msg)
+            # Check CQ code format [CQ:at,qq=...]
             if f"[CQ:at,qq={self.self_id}]" in raw_str:
                 is_at_me = True
+            # Check @name (qq_id) format in raw_message
+            elif f"({self.self_id})" in raw_str:
+                is_at_me = True
+            # Check message segments for at type
+            elif isinstance(msg_segments, list):
+                for seg in msg_segments:
+                    if isinstance(seg, dict) and seg.get("type") == "at":
+                        data = seg.get("data", {})
+                        if isinstance(data, dict) and str(data.get("qq", "")) == str(self.self_id):
+                            is_at_me = True
+                            break
+                        if isinstance(data, str) and data == str(self.self_id):
+                            is_at_me = True
+                            break
+            if is_at_me:
                 self.writer.write_alert("NAPCAT_CLI_AT_ME", {
                     "summary": f"@mentioned by {nickname} in {'group ' + str(group_id) if group_id else 'DM'}",
                     "sender_id": sender_id,
                     "group_id": str(group_id) if group_id else "",
                     "message_id": msg_id,
                 })
-                self._wake("AT_ME", event)
+                self._wake("AT_ME", event, self_triggered=(sender_id == self.self_id))
 
-            msg_segments = event.get("message", [])
-            if isinstance(msg_segments, list):
-                for seg in msg_segments:
-                    if isinstance(seg, dict) and seg.get("type") == "reply":
-                        data = seg.get("data", {})
-                        if isinstance(data, str):
-                            try:
-                                import urllib.parse
-                                data = json.loads(urllib.parse.unquote(data))
-                            except Exception:
-                                pass
-                        if isinstance(data, dict) and str(data.get("id", "")) == msg_id:
-                            self.writer.write_alert("NAPCAT_CLI_REPLY_TO_ME", {
-                                "summary": f"Reply from {nickname}",
-                                "sender_id": sender_id,
-                                "group_id": str(group_id) if group_id else "",
-                                "message_id": msg_id,
-                            })
-                            self._wake("REPLY_TO_ME", event)
-                            break
+        # Now check for reply segments
+        if isinstance(msg_segments, list):
+            for seg in msg_segments:
+                if isinstance(seg, dict) and seg.get("type") == "reply":
+                    rdata = seg.get("data", {})
+                    if isinstance(rdata, str):
+                        try:
+                            import urllib.parse
+                            rdata = json.loads(urllib.parse.unquote(rdata))
+                        except Exception:
+                            pass
+                    if isinstance(rdata, dict) and str(rdata.get("id", "")) == msg_id:
+                        self.writer.write_alert("NAPCAT_CLI_REPLY_TO_ME", {
+                            "summary": f"Reply from {nickname}",
+                            "sender_id": sender_id,
+                            "group_id": str(group_id) if group_id else "",
+                            "message_id": msg_id,
+                        })
+                        self._wake("REPLY_TO_ME", event, self_triggered=(sender_id == self.self_id))
+                        break
+        # --- OCR auto-processing for image messages ---
+        if isinstance(msg_segments, list):
+            for seg in msg_segments:
+                if isinstance(seg, dict) and seg.get("type") == "image":
+                    data = seg.get("data", {})
+                    # Get image URL or file path
+                    image_url = data.get("url", "")
+                    file_id = data.get("file_id", "") or data.get("file", "")
+                    if image_url or file_id:
+                        target = image_url or file_id
+                        try:
+                            from napcat_cli.lib.ocr import ocr_file
+                            ocr_text = ocr_file(target)
+                            if ocr_text:
+                                # Add OCR text to segment data for downstream use
+                                data["ocr_text"] = ocr_text
+                                # Also add summary if not present
+                                if not data.get("summary"):
+                                    data["summary"] = ocr_text[:100]
+                                self.log(f"[OCR] Auto-OCR completed for image: {ocr_text[:50]}")
+                        except Exception as e:
+                            self.log(f"[OCR] Failed to auto-OCR image: {e}")
 
         # --- Trigger word detection on plain text (no CQ codes) ---
         segs = event.get("message", [])
@@ -224,7 +260,7 @@ class EventProcessor:
                 "group_id": "",
                 "message_id": msg_id,
             })
-            self._wake("DM_ME", event)
+            self._wake("DM_ME", event, self_triggered=(sender_id == self.self_id))
 
     def _handle_notice(self, event: dict) -> None:
         notice_type = event.get("notice_type", "")
@@ -291,7 +327,7 @@ class EventProcessor:
             })
             # Wake if bot was poked
             if self.self_id and target_id == self.self_id:
-                self._wake("NEW_POKE", event)
+                self._wake("NEW_POKE", event, self_triggered=(sender_id == self.self_id))
         elif sub_type == "lucky_king":
             self.writer.write_alert("NAPCAT_CLI_NEW_POKE", {
                 "summary": "Lucky king (red packet)",
@@ -518,10 +554,18 @@ class EventProcessor:
             text = str(msg)
         return f"who={who} where={where} text={text[:40]!r}"
 
-    def _wake(self, reason: str, event: dict | None = None) -> None:
+    def _wake(self, reason: str, event: dict | None = None, self_triggered: bool = False) -> None:
         if not self.wake_on_event:
             self.log(f"[WAKE] disabled, skip reason={reason}")
             return
+
+        if self_triggered:
+            self.log(f"[WAKE] self-triggered reason={reason}, adding loop warning to prompt")
+            self.writer.write_alert("NAPCAT_CLI_SELF_TRIGGERED", {
+                "summary": f"Self-triggered event (will wake with loop warning): {reason}",
+                "reason": reason,
+                "timestamp": int(time.time()),
+            })
 
         self.log(f"[WAKE] trigger reason={reason} {self._event_brief(event)}")
         self.writer.write_alert("NAPCAT_CLI_NEED_WAKE_UP", {
@@ -534,7 +578,7 @@ class EventProcessor:
         # Waker with http->cli auto-fallback; also owns the legacy_command escape
         # hatch when no backend is configured).
         if self.orchestrator is not None:
-            self.orchestrator.submit(reason, event)
+            self.orchestrator.submit(reason, event, self_triggered=self_triggered)
             return
 
         # Legacy path: run wake_command as a shell string (back-compat).
@@ -548,7 +592,6 @@ class EventProcessor:
                              capture_output=True, text=True)
             except Exception as e:
                 self.log(f"Wake command failed: {e}")
-
 
 # ---------------------------------------------------------------------------
 # In-memory event cache (for HTTP provider reads)
@@ -619,7 +662,7 @@ async def ws_daemon(ws_url: str, processor: EventProcessor, cache: EventCache) -
                 retry_delay = 5
 
             except ImportError:
-                from websockets.connect import connect
+                from websockets.asyncio.client import connect
                 async with connect(ws_url, ping_interval=30) as ws:
                     processor.log(f"Connected to {ws_url}")
                     retry_delay = 5
@@ -1150,11 +1193,21 @@ class NapCatHandler(BaseHTTPRequestHandler):
         elif kind == "json":
             import json
             return json.loads(payload)
+        elif kind == "smart_text":
+            # Smart text: pass through as a raw string so NapCat parses any
+            # [CQ:...] markers it contains. Pure text (no CQ tokens) is sent
+            # as-is — NapCat treats a bare string as a single text segment.
+            return payload
         else:
             raise ValueError(f"unknown message kind: {kind}")
 
+    _CQ_PATTERN = re.compile(r"\[CQ:[A-Za-z0-9_]+[^\]]*\]")
+
+    @classmethod
+    def _has_cq_codes(cls, text: str) -> bool:
+        """Return True if text contains any CQ code markers like [CQ:at,...]."""
+        return bool(cls._CQ_PATTERN.search(text or ""))
     def _format_send_result(self, api_result: dict) -> dict:
-        """Format API send result for writeback read."""
         if api_result.get("retcode", -1) == 0:
             data = api_result.get("data", {})
             mid = data.get("message_id", 0)
@@ -1193,15 +1246,16 @@ class NapCatHandler(BaseHTTPRequestHandler):
         db = get_connection(self.cache.data_dir)
 
         if action == "get_events":
+            mark_seen = params.get("mark_seen", False)
             events = db_read_events(
                 db,
                 limit=params.get("limit", 50),
                 since=params.get("since", None),
                 post_type=params.get("post_type", None),
                 event_type=params.get("event_type", None),
+                mark_seen=mark_seen,
             )
             return {"events": events, "count": len(events)}
-
         if action == "get_event":
             event_id = params.get("id", "")
             from napcat_cli.lib.events_sqlite import read_events as db_read
@@ -1342,6 +1396,43 @@ class NapCatHandler(BaseHTTPRequestHandler):
             alert_count = get_alert_count(db)
             return {"event_count": event_count, "alert_count": alert_count}
 
+        # Seen/Read tracking
+        if action == "mark_seen":
+            event_ids = params.get("event_ids", [])
+            if not isinstance(event_ids, list):
+                return {"error": "event_ids must be a list"}
+            count = self.events_reader.mark_seen(event_ids)
+            return {"marked_seen": count}
+
+        if action == "mark_read":
+            event_ids = params.get("event_ids", [])
+            if not isinstance(event_ids, list):
+                return {"error": "event_ids must be a list"}
+            count = self.events_reader.mark_read(event_ids)
+            return {"marked_read": count}
+
+        if action == "mark_read_up_to":
+            group_id = params.get("group_id")
+            user_id = params.get("user_id")
+            timestamp = params.get("timestamp")
+            if timestamp is None:
+                return {"error": "timestamp is required"}
+            count = self.events_reader.mark_read_up_to(
+                int(group_id) if group_id is not None else None,
+                int(user_id) if user_id is not None else None,
+                int(timestamp)
+            )
+            return {"marked_read": count}
+
+        if action == "get_unread_count":
+            group_id = params.get("group_id")
+            user_id = params.get("user_id")
+            count = self.events_reader.get_unread_count(
+                int(group_id) if group_id is not None else None,
+                int(user_id) if user_id is not None else None
+            )
+            return {"unread_count": count}
+
         if action == "send_group_message":
             group_id = str(params.get("group_id", ""))
             message = params.get("message", "")
@@ -1368,9 +1459,27 @@ class NapCatHandler(BaseHTTPRequestHandler):
                 return {"error": "group_id and payload are required", "expected_schema": ACTION_SCHEMAS.get("send_group_text", {})}
             from napcat_cli.lib.api import NapCatAPI
             api = NapCatAPI()
-            msg = self._compose_message("text", payload)
+            msg = self._compose_message("smart_text", payload)
             r = api.call("send_msg", message_type="group", group_id=int(group_id) if group_id.isdigit() else group_id, message=msg)
             return self._format_send_result(r)
+
+        if action == "send_group_text_raw":
+            group_id = str(params.get("group_id", ""))
+            payload = self._resolve_payload(params, "text")
+            if not group_id or not payload:
+                return {"error": "group_id and payload are required", "expected_schema": ACTION_SCHEMAS.get("send_group_text_raw", {})}
+            warning = None
+            if self._has_cq_codes(payload):
+                warning = "WARNING: CQ codes detected in /text_raw payload; they will be sent as literal text (not parsed). Use /text endpoint if you want CQ codes parsed."
+            from napcat_cli.lib.api import NapCatAPI
+            api = NapCatAPI()
+            # Use "text" kind to send as literal JSON text segment (no CQ parsing)
+            msg = self._compose_message("text", payload)
+            r = api.call("send_msg", message_type="group", group_id=int(group_id) if group_id.isdigit() else group_id, message=msg)
+            result = self._format_send_result(r)
+            if warning:
+                result["warning"] = warning
+            return result
 
         if action == "send_group_image":
             group_id = str(params.get("group_id", ""))
@@ -1437,9 +1546,26 @@ class NapCatHandler(BaseHTTPRequestHandler):
                 return {"error": "user_id and payload are required", "expected_schema": ACTION_SCHEMAS.get("send_private_text", {})}
             from napcat_cli.lib.api import NapCatAPI
             api = NapCatAPI()
-            msg = self._compose_message("text", payload)
+            msg = self._compose_message("smart_text", payload)
             r = api.call("send_msg", message_type="private", user_id=int(user_id) if user_id.isdigit() else user_id, message=msg)
             return self._format_send_result(r)
+
+        if action == "send_private_text_raw":
+            user_id = str(params.get("user_id", ""))
+            payload = self._resolve_payload(params, "text")
+            if not user_id or not payload:
+                return {"error": "user_id and payload are required", "expected_schema": ACTION_SCHEMAS.get("send_private_text_raw", {})}
+            warning = None
+            if self._has_cq_codes(payload):
+                warning = "WARNING: CQ codes detected in /text_raw payload; they will be sent as literal text (not parsed). Use /text endpoint if you want CQ codes parsed."
+            from napcat_cli.lib.api import NapCatAPI
+            api = NapCatAPI()
+            msg = self._compose_message("text", payload)
+            r = api.call("send_msg", message_type="private", user_id=int(user_id) if user_id.isdigit() else user_id, message=msg)
+            result = self._format_send_result(r)
+            if warning:
+                result["warning"] = warning
+            return result
 
         if action == "send_private_image":
             user_id = str(params.get("user_id", ""))
@@ -1507,10 +1633,29 @@ class NapCatHandler(BaseHTTPRequestHandler):
                 return {"error": "group_id, message_id, and payload are required", "expected_schema": ACTION_SCHEMAS.get("reply_group_text", {})}
             from napcat_cli.lib.api import NapCatAPI
             api = NapCatAPI()
-            base = self._compose_message("text", payload)
+            base = self._compose_message("smart_text", payload)
             msg = self._compose_reply(base, message_id)
             r = api.call("send_msg", message_type="group", group_id=int(group_id) if group_id.isdigit() else group_id, message=msg)
             return self._format_send_result(r)
+
+        if action == "reply_group_text_raw":
+            group_id = str(params.get("group_id", ""))
+            message_id = str(params.get("message_id", ""))
+            payload = self._resolve_payload(params, "text")
+            if not group_id or not message_id or not payload:
+                return {"error": "group_id, message_id, and payload are required", "expected_schema": ACTION_SCHEMAS.get("reply_group_text_raw", {})}
+            warning = None
+            if self._has_cq_codes(payload):
+                warning = "WARNING: CQ codes detected in /text_raw payload; they will be sent as literal text (not parsed). Use /text endpoint if you want CQ codes parsed."
+            from napcat_cli.lib.api import NapCatAPI
+            api = NapCatAPI()
+            base = self._compose_message("text", payload)
+            msg = self._compose_reply(base, message_id)
+            r = api.call("send_msg", message_type="group", group_id=int(group_id) if group_id.isdigit() else group_id, message=msg)
+            result = self._format_send_result(r)
+            if warning:
+                result["warning"] = warning
+            return result
 
         if action == "reply_group_image":
             group_id = str(params.get("group_id", ""))
@@ -1586,10 +1731,25 @@ class NapCatHandler(BaseHTTPRequestHandler):
                 return {"error": "user_id, message_id, and payload are required", "expected_schema": ACTION_SCHEMAS.get("reply_private_text", {})}
             from napcat_cli.lib.api import NapCatAPI
             api = NapCatAPI()
+            base = self._compose_message("smart_text", payload)
+        if action == "reply_private_text_raw":
+            user_id = str(params.get("user_id", ""))
+            message_id = str(params.get("message_id", ""))
+            payload = self._resolve_payload(params, "text")
+            if not user_id or not message_id or not payload:
+                return {"error": "user_id, message_id, and payload are required", "expected_schema": ACTION_SCHEMAS.get("reply_private_text_raw", {})}
+            warning = None
+            if self._has_cq_codes(payload):
+                warning = "WARNING: CQ codes detected in /text_raw payload; they will be sent as literal text (not parsed). Use /text endpoint if you want CQ codes parsed."
+            from napcat_cli.lib.api import NapCatAPI
+            api = NapCatAPI()
             base = self._compose_message("text", payload)
             msg = self._compose_reply(base, message_id)
             r = api.call("send_msg", message_type="private", user_id=int(user_id) if user_id.isdigit() else user_id, message=msg)
-            return self._format_send_result(r)
+            result = self._format_send_result(r)
+            if warning:
+                result["warning"] = warning
+            return result
 
         if action == "reply_private_image":
             user_id = str(params.get("user_id", ""))
@@ -1655,7 +1815,6 @@ class NapCatHandler(BaseHTTPRequestHandler):
             msg = [{"type": "reply", "data": {"id": str(message_id)}}] + message
             r = api.call("send_msg", message_type="private", user_id=int(user_id) if user_id.isdigit() else user_id, message=msg)
             return self._format_send_result(r)
-
         if action == "list_message_content":
             message_id = str(params.get("message_id", ""))
             group_id = str(params.get("group_id", ""))
@@ -1675,6 +1834,7 @@ class NapCatHandler(BaseHTTPRequestHandler):
             segments = event.get("message", [])
             entries = [{"name": "metadata", "kind": "api"}, {"name": "text", "kind": "api"}, {"name": "reply", "kind": "dir"}]
             image_count = 0
+            file_count = 0
             for seg in segments:
                 stype = seg.get("type", "")
                 if stype == "image":
@@ -1805,6 +1965,16 @@ class NapCatHandler(BaseHTTPRequestHandler):
             if isinstance(r, dict) and "error" in r:
                 r["hint"] = "Recall rules: bot recalling its own message must act within 2 minutes. Admin can recall any member message. Group owner can recall any message. No time limit for admin/owner recalling others' messages."
             return r
+        # ---- OCR image ----
+        if action == "ocr_image":
+            from napcat_cli.lib.ocr import ocr_file
+            image_url = params.get("url", "")
+            image_path = params.get("path", "")
+            if not image_url and not image_path:
+                return {"error": "Missing 'url' or 'path' parameter"}
+            target = image_path or image_url
+            text = ocr_file(target)
+            return {"text": text, "source": target}
         # Proxy NapCat API calls through napcat_ prefix
         if action.startswith("napcat_"):
             from napcat_cli.lib.api import NapCatAPI
@@ -1922,20 +2092,26 @@ def run_daemon(config_path: str) -> None:
     from napcat_cli.lib.config import NapCatConfig
     wake_cfg = NapCatConfig()
     for _k in ("wake_preset", "wake_primary", "wake_session", "wake_http_url",
-               "wake_http_key", "wake_http_session_id", "wake_cli_command"):
+               "wake_http_key", "wake_http_session_id", "wake_cli_command",
+               "wake_timeout"):
         if _k in cfg_data:
             setattr(wake_cfg, _k, cfg_data[_k])
     waker = build_waker(wake_cfg)
     debounce = float(cfg_data.get("wake_debounce_seconds", 3.0))
     cooldown = float(cfg_data.get("wake_cooldown_seconds", 30.0))
     nm_idle = int(cfg_data.get("wake_new_message_idle_seconds", 600))
-
+    wake_timeout = float(cfg_data.get("wake_timeout", 300.0))
     processor = EventProcessor(DATA_DIR, self_id, wake_command, wake_on_event,
         group_trigger_word=group_trigger,
         private_trigger=private_trigger,
         waker=waker, debounce_seconds=debounce, cooldown_seconds=cooldown,
         new_message_idle_seconds=nm_idle,
+        wake_timeout=wake_timeout,
     )
+    from napcat_cli.lib.events import EventsReader
+    events_reader = EventsReader(DATA_DIR)
+    if processor.orchestrator is not None:
+        processor.orchestrator.events_reader = events_reader
     cache = EventCache(DATA_DIR)
 
     # PID file

@@ -38,7 +38,8 @@ def get_connection(data_dir: Path | None = None) -> sqlite3.Connection:
 
 def init_db(conn: sqlite3.Connection) -> None:
     """Initialize the database schema if tables don't exist."""
-    conn.executescript(
+    # Create tables (IF NOT EXISTS: no-op if table already exists)
+    conn.execute(
         "CREATE TABLE IF NOT EXISTS events ("
         "id INTEGER PRIMARY KEY AUTOINCREMENT, "
         "timestamp INTEGER NOT NULL, "
@@ -48,34 +49,52 @@ def init_db(conn: sqlite3.Connection) -> None:
         "self_id INTEGER, "
         "group_id INTEGER, "
         "user_id INTEGER, "
-        "message_id INTEGER, "
+        "message_id INTEGER DEFAULT NULL, "
         "message_type TEXT, "
         "sender_id INTEGER, "
+        "seen INTEGER NOT NULL DEFAULT 0, "
+        "read_timestamp INTEGER DEFAULT NULL, "
+        "ocr_text TEXT DEFAULT NULL, "
+        "ocr_hash TEXT DEFAULT NULL, "
         "created_at INTEGER NOT NULL"
-        "); "
-
-        "CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp DESC); "
-        "CREATE INDEX IF NOT EXISTS idx_events_post_type ON events(post_type); "
-        "CREATE INDEX IF NOT EXISTS idx_events_event_type ON events(event_type); "
-        "CREATE INDEX IF NOT EXISTS idx_events_group_id ON events(group_id); "
-        "CREATE INDEX IF NOT EXISTS idx_events_user_id ON events(user_id); "
-        "CREATE INDEX IF NOT EXISTS idx_events_sender_id ON events(sender_id); "
-
+        ")"
+    )
+    conn.execute(
         "CREATE TABLE IF NOT EXISTS alerts ("
         "id INTEGER PRIMARY KEY AUTOINCREMENT, "
         "name TEXT NOT NULL, "
         "timestamp INTEGER NOT NULL, "
         "raw_json TEXT NOT NULL, "
         "created_at INTEGER NOT NULL"
-        "); "
-
-        "CREATE INDEX IF NOT EXISTS idx_alerts_name ON alerts(name); "
-        "CREATE INDEX IF NOT EXISTS idx_alerts_timestamp ON alerts(timestamp DESC);"
+        ")"
     )
     conn.commit()
 
+    # Create indexes individually (may fail if column missing — migration below fixes that)
+    for idx in [
+        "idx_events_timestamp ON events(timestamp DESC)",
+        "idx_events_post_type ON events(post_type)",
+        "idx_events_event_type ON events(event_type)",
+        "idx_events_group_id ON events(group_id)",
+        "idx_events_user_id ON events(user_id)",
+        "idx_events_sender_id ON events(sender_id)",
+        "idx_events_seen ON events(seen)",
+        "idx_events_read_timestamp ON events(read_timestamp)",
+        "idx_alerts_name ON alerts(name)",
+        "idx_alerts_timestamp ON alerts(timestamp DESC)",
+    ]:
+        try:
+            conn.execute(f"CREATE INDEX IF NOT EXISTS {idx}")
+        except sqlite3.OperationalError:
+            pass
+    conn.commit()
+
     # Schema migration: add columns missing from older databases
-    for col, ctype in (("message_id", "INTEGER DEFAULT NULL"),):
+    for col, ctype in (("message_id", "INTEGER DEFAULT NULL"),
+                        ("seen", "INTEGER NOT NULL DEFAULT 0"),
+                        ("read_timestamp", "INTEGER DEFAULT NULL"),
+                        ("ocr_text", "TEXT DEFAULT NULL"),
+                        ("ocr_hash", "TEXT DEFAULT NULL")):
         try:
             conn.execute(f"ALTER TABLE events ADD COLUMN {col} {ctype}")
         except sqlite3.OperationalError:
@@ -91,6 +110,21 @@ def init_db(conn: sqlite3.Connection) -> None:
     except sqlite3.OperationalError:
         pass
 
+    try:
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_events_seen ON events(seen)"
+        )
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass
+
+    try:
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_events_read_timestamp ON events(read_timestamp)"
+        )
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass
 
 # ---------------------------------------------------------------------------
 # Writer operations
@@ -140,7 +174,6 @@ def write_alert(conn: sqlite3.Connection, name: str, data: dict[str, Any]) -> in
 # ---------------------------------------------------------------------------
 # Reader operations
 # ---------------------------------------------------------------------------
-
 def read_events(
     conn: sqlite3.Connection,
     limit: int = 50,
@@ -150,9 +183,14 @@ def read_events(
     group_id: int | None = None,
     user_id: int | None = None,
     keyword: str | None = None,
+    mark_seen: bool = False,
 ) -> list[dict[str, Any]]:
-    """Read events from the database, newest first."""
-    query = "SELECT raw_json FROM events WHERE 1=1"
+    """Read events from the database, newest first.
+
+    Args:
+        mark_seen: If True, mark returned events as seen (auto-set when read via API/CLI/FS).
+    """
+    query = "SELECT id, raw_json FROM events WHERE 1=1"
     params: list[Any] = []
 
     if event_type:
@@ -178,15 +216,22 @@ def read_events(
     query += " ORDER BY timestamp DESC LIMIT ?"
     params.append(limit)
 
-    rows = conn.execute(query, params).fetchall()
+    cur = conn.execute(query, params)
+    rows = cur.fetchall()
     events = []
-    for row in rows:
-        try:
-            events.append(json.loads(row["raw_json"]))
-        except json.JSONDecodeError:
-            continue
-    return events
+    event_ids = []
+    for r in rows:
+        event = json.loads(r["raw_json"])
+        event["id"] = r["id"]
+        events.append(event)
+        event_ids.append(r["id"])
 
+    if mark_seen and event_ids:
+        placeholders = ",".join("?" * len(event_ids))
+        conn.execute(f"UPDATE events SET seen = 1 WHERE id IN ({placeholders}) AND seen = 0", event_ids)
+        conn.commit()
+
+    return events
 
 def read_alerts(
     conn: sqlite3.Connection,
@@ -231,6 +276,56 @@ def get_alert_count(conn: sqlite3.Connection, name: str | None = None) -> int:
     if name:
         return conn.execute("SELECT COUNT(*) FROM alerts WHERE name = ?", (name,)).fetchone()[0]
     return conn.execute("SELECT COUNT(*) FROM alerts").fetchone()[0]
+
+
+def mark_event_seen(
+    conn: sqlite3.Connection,
+    message_id: int,
+    group_id: int | None = None,
+    user_id: int | None = None,
+) -> int:
+    """Mark an event as seen. Returns count of updated rows."""
+    query = "UPDATE events SET seen = 1 WHERE message_id = ?"
+    params = [message_id]
+    if group_id:
+        query += " AND group_id = ?"
+        params.append(group_id)
+    if user_id:
+        query += " AND (user_id = ? OR sender_id = ?)"
+        params.append(user_id)
+        params.append(user_id)
+    cur = conn.execute(query, params)
+    conn.commit()
+    return cur.rowcount
+
+
+def mark_event_read(
+    conn: sqlite3.Connection,
+    message_id: int,
+    group_id: int | None = None,
+    user_id: int | None = None,
+) -> int:
+    """Mark an event as read (sets read_timestamp). Returns count of updated rows."""
+    query = "UPDATE events SET seen = 1, read_timestamp = ? WHERE message_id = ?"
+    params = [int(time.time()), message_id]
+    if group_id:
+        query += " AND group_id = ?"
+        params.append(group_id)
+    if user_id:
+        query += " AND (user_id = ? OR sender_id = ?)"
+        params.append(user_id)
+        params.append(user_id)
+    cur = conn.execute(query, params)
+    conn.commit()
+    return cur.rowcount
+
+
+def mark_alerts_read(
+    conn: sqlite3.Connection,
+    name: str | None = None,
+) -> int:
+    """Mark all alerts as read (deletes them). Returns count of deleted rows."""
+    return clear_alerts(conn, name)
 
 
 def prune_events(conn: sqlite3.Connection, older_than_days: int = 7) -> int:

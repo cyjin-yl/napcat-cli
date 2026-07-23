@@ -49,7 +49,7 @@ class NapCatConfig:
     wake_debounce_seconds: float = 3.0
     wake_cooldown_seconds: float = 30.0
     wake_new_message_idle_seconds: int = 600
-
+    wake_timeout: float = 300.0         # wake backend timeout (seconds)
     event_dir: str = "events"
     alert_dir: str = "alerts"
     log_file: str = "daemon.log"
@@ -61,6 +61,8 @@ class NapCatConfig:
     skills_fs_binary: str = ""
     skills_fs_mountpoint: str = ""
     skills_fs_config: str = ""
+    # TUI settings
+    tui_show_images: bool = True
 
     def save(self) -> None:
         """Save config to file atomically via temp file then rename."""

@@ -5,7 +5,7 @@ Standalone CLI and daemon for NapCat QQ bot management with skills-fs integratio
 [![PyPI](https://img.shields.io/pypi/v/napcat-cli.svg?label=PyPI)](https://pypi.org/project/napcat-cli/)
 [![Python versions](https://img.shields.io/pypi/pyversions/napcat-cli.svg)](https://pypi.org/project/napcat-cli/)
 
-> 📝 **介绍博文：** [napcat-cli 群配置与管理速查](https://yvxi.pages.dev/blog/napcat-cli-group-config/) — 从零配置、群消息收发、Agent Wake 的完整链路。
+> 介绍博文： [napcat-cli 群配置与管理速查](https://yvxi.pages.dev/blog/napcat-cli-group-config/) — 从零配置、群消息收发、Agent Wake 的完整链路。
 
 ---
 
@@ -78,79 +78,166 @@ default) carrying a **contextual prompt** so it can read the inbox and reply.
 The wake mechanism is **generic and pluggable** — Hermes is just the default
 preset; any HTTP endpoint or shell command works.
 
+### How it works
+
+```
+QQ Event (WS) --> EventProcessor --> WakeOrchestrator (debounce/cooldown/queue)
+                                          |
+                                     Waker (auto-fallback)
+                                    /              \
+                          HTTP API (preferred)    CLI (fallback)
+                          POST /chat              hermes -z "..."
+                          fixed session_id        --continue <session>
+```
+
+- **Debounce** (`wake_debounce_seconds`, default 3): coalesces a burst of same-reason events into one wake.
+- **Cooldown** (`wake_cooldown_seconds`, default 30): suppresses repeat wakes for non-urgent reasons.
+- **Serial queue**: `WakeOrchestrator` has a single worker thread — wakes to the same session are processed **one at a time**, preventing concurrent "split personality" responses.
+- **Timeout**: `wake_timeout` (default 300s) — how long to wait for the agent to respond.
+
+Every wake is logged to `daemon.log`:
+```
+[WAKE] trigger reason=AT_ME who=Alice where=group123 text='hello'
+[WAKE] queued reason=AT_ME pending=1 debounce=1.0s primary=auto
+[WAKE] delivered reason=AT_ME transport=http detail=POST /api/sessions/.../chat -> 200
+```
+
+### Event routing
+
+| Trigger | Behavior |
+|---------|----------|
+| `AT_ME`, `REPLY_TO_ME`, `DM_ME` | Near-immediate wake (cooldown bypassed). Prompt includes who/where/text, image metadata, reply chain, and skill hints. |
+| `GROUP_TRIGGER` | Debounced wake (group trigger-word match) |
+| `NEW_MESSAGE` (not @) | Tracked, not woken; if unread longer than `wake_new_message_idle_seconds` -> `NEW_MESSAGE_BACKLOG` wake |
+| `NEW_FRIEND`, `NEW_REQUEST`, `BOT_BANNED`, `NEW_POKE`, `GROUP_ADMIN_CHANGE`, `NEW_GROUP_MEMBER`, `BOT_OFFLINE`, ... | Debounced + cooldown-bounded wake |
+
+AT_ME detection supports all NapCat message formats: CQ code (`[CQ:at,qq=...]`), display name (`@name (qq)`), and message segments (`{"type":"at","data":{"qq":"..."}}`).
+
 ### Two transports, auto-fallback
 
 | Transport | When it's used | Needs |
 |-----------|----------------|-------|
-| **CLI one-shot** (default) | Always available | `hermes` on PATH |
-| **HTTP API server** | Opt-in (best latency, idempotent, in-session) | `wake_http_url` + `wake_http_key` |
+| **HTTP API server** (preferred) | When `wake_http_url` + `wake_http_key` are set | Agent's HTTP API endpoint |
+| **CLI one-shot** (fallback) | Always available | Agent CLI on PATH |
 
-`wake_primary=auto` tries HTTP first (if configured + reachable), else falls back
-to the CLI one-shot. The Hermes CLI backend runs
-`hermes --continue <session> -z "<prompt>" --yolo --pass-session-id`; the HTTP
-backend POSTs to `POST /api/sessions/{id}/chat` (verified per the Hermes API
-docs), with `Authorization: Bearer <key>` and an `Idempotency-Key` header.
+`wake_primary=auto` tries HTTP first (if configured + reachable), else falls back to CLI.
 
-### Event routing
+### Configuring for Hermes Agent
 
-### Event routing
-96:
-97:| Trigger | Behavior |
-98:|---------|----------|
-99:| `AT_ME`, `REPLY_TO_ME`, `DM_ME` | Near-immediate wake (cooldown bypassed), with who/where/text in the prompt. `DM_ME` fires on any private (DM) message. **Wake prompt includes image metadata (file_id, url, sub_type, size), reply chain (reply message ID), and skill hints for OCR/image download.** |
-99:| `GROUP_TRIGGER` | Debounced wake (group trigger-word match; private messages wake via `DM_ME` instead) |
-100:| `NEW_MESSAGE` (not @) | Tracked, not woken; if unread longer than `wake_new_message_idle_seconds` → a `NEW_MESSAGE_BACKLOG` wake |
-102:| `NEW_FRIEND`, `NEW_REQUEST`, `BOT_BANNED`, `NEW_POKE`, `GROUP_ADMIN_CHANGE`, `NEW_GROUP_MEMBER`, `BOT_OFFLINE`, … | Debounced + cooldown-bounded wake so the agent perceives them within a reasonable window |
-103:
-103:Debounce (`wake_debounce_seconds`, default 3) coalesces a burst into one wake;
-104:cooldown (`wake_cooldown_seconds`, default 30) suppresses repeats. Every wake is
-105:logged to `daemon.log` as `[WAKE] trigger / queued / deliver / reply` lines
-106:(including transport, elapsed time, and the agent's reply), and `daemon.log` is
-106:size-rotated (2 MB × 5) so it can't fill the disk.
-108:
-108:### Image & OCR Capabilities
-109:
-109:The wake prompt automatically includes image metadata when an image message is received:
-109:- `file_id` — 图片文件 ID
-109:- `url` — 图片下载链接
-109:- `sub_type` — 图片类型 (0=普通, 1=动画表情, 7=赞/点赞)
-109:- `file_size` — 文件大小（字节）
-109:- `summary` — 图片摘要/描述
-109:- `reply_id` — 回复消息 ID（用于追踪回复链）
-109:
-109:Agent can use these skills via skills-fs:
-109:- `/napcat/ocr` — OCR 识图 (支持 file:///path、URL、base64)
-110:- `/napcat/get_image` — 下载图片 (输入 JSON `{"url": "..."}`)
-110:- `/napcat/ocr` — OCR 识图 (支持 file:///path、URL、base64)
-111:- `/napcat/groups/:group_id/:time_range/:message_id/:content` — 获取消息媒体内容
-111:- `/napcat/groups/:group_id/send/image` — 发送图片
-111:- `/napcat/friends/:user_id/send/image` — 发送私聊图片
+#### Option A: HTTP API Server (recommended)
 
-### Configure
+The HTTP API server is the recommended wake transport. It provides:
+- **Session continuity**: all wakes go to the same session (no "split personality")
+- **Idempotency**: `Idempotency-Key` header prevents duplicate processing on retry
+- **Persistence**: session history is stored in `~/.hermes/state.db`
+- **Lower latency**: no CLI process spawn overhead
 
-The easiest path is the wizard:
+**Step 1: Enable Hermes API Server**
 
+Add to `~/.hermes/.env`:
 ```bash
-napcat setup        # choose Hermes preset; CLI one-shot by default, HTTP opt-in
+API_SERVER_ENABLED=true
+API_SERVER_KEY=$(openssl rand -hex 32)   # generate a random key
 ```
 
-Or set keys directly:
+Restart the gateway:
+```bash
+sudo systemctl restart hermes-gateway.service
+# Verify API server is listening:
+curl http://127.0.0.1:8642/health
+```
+
+**Step 2: Create a dedicated QQ session**
+
+```bash
+curl -X POST http://127.0.0.1:8642/api/sessions \
+  -H "Authorization: Bearer <API_SERVER_KEY>" \
+  -H "Content-Type: application/json" \
+  -d '{"title": "napcat-qq"}'
+# Response: {"session": {"id": "api_1784824379_59dd9495", ...}}
+```
+
+**Step 3: Configure napcat-cli**
 
 ```bash
 napcat config set wake_enabled true
-napcat config set wake_preset hermes        # hermes | custom | none
-napcat config set wake_session napcat-qq
-napcat config set wake_primary auto         # auto | http | cli
-# HTTP (optional). Key also readable from NAPCAT_WAKE_HTTP_KEY / HERMES_API_KEY:
+napcat config set wake_preset hermes
+napcat config set wake_primary auto              # try HTTP first, CLI fallback
 napcat config set wake_http_url http://127.0.0.1:8642
 napcat config set wake_http_key <API_SERVER_KEY>
-napcat config set wake_new_message_idle_seconds 600
+napcat config set wake_http_session_id <SESSION_ID>  # from Step 2
+napcat config set wake_session napcat-qq         # CLI fallback session name
+napcat config set wake_timeout 300               # seconds
 ```
 
-To enable the Hermes HTTP API server (appends to `~/.hermes/.env` and restarts
-the `hermes-gateway.service` systemd unit), answer "y" during `napcat setup`, or
-set `API_SERVER_ENABLED=true` + `API_SERVER_KEY` in `~/.hermes/.env` yourself and
-`sudo systemctl restart hermes-gateway.service`.
+Or edit `~/.napcat-data/daemon.json` directly:
+```json
+{
+  "wake_enabled": true,
+  "wake_preset": "hermes",
+  "wake_primary": "auto",
+  "wake_http_url": "http://127.0.0.1:8642",
+  "wake_http_key": "<API_SERVER_KEY>",
+  "wake_http_session_id": "<SESSION_ID>",
+  "wake_session": "napcat-qq",
+  "wake_timeout": 300.0,
+  "wake_cli_command": "hermes --continue {session} -z \"$(cat {prompt_file})\" --yolo --pass-session-id"
+}
+```
+
+Key env vars (also checked by Hermes preset, in priority order):
+- `NAPCAT_WAKE_HTTP_KEY` — HTTP API bearer token
+- `HERMES_API_KEY` — alias for the above
+
+#### Option B: CLI one-shot (simpler, less reliable)
+
+If you don't want to run the API server, napcat-cli can invoke the Hermes CLI
+directly. The CLI backend writes the prompt to a temp file and passes it via
+`$(cat {prompt_file})` to avoid shell quoting issues.
+
+```bash
+napcat config set wake_primary cli
+napcat config set wake_session napcat-qq
+napcat config set wake_cli_command 'hermes --continue {session} -z "$(cat {prompt_file})" --yolo --pass-session-id'
+```
+
+Limitations of CLI mode:
+- Each invocation may create a **new session** if the name doesn't match an existing one
+- No idempotency — retries may cause duplicate processing
+- ~30-60s per invocation (CLI process startup + model inference)
+- Large prompts with special characters require the `$(cat {prompt_file})` pattern (not `-z -`, which Hermes treats as literal text "-")
+
+### Configuring for other agents
+
+napcat-cli's wake system is agent-agnostic. Any HTTP endpoint or shell command works.
+
+#### Custom HTTP endpoint
+
+```bash
+napcat config set wake_preset custom
+napcat config set wake_primary http
+napcat config set wake_http_url http://127.0.0.1:9000
+napcat config set wake_http_key my-secret-key
+# The HTTP backend POSTs to: {wake_http_url}/api/sessions/{session}/chat
+# Body: {"input": "<prompt>"}
+# Headers: Authorization: Bearer <key>, Idempotency-Key: <unique-id>
+# If your endpoint uses a different path/body format, see wake_backend.py HttpWakeBackend
+```
+
+#### Custom CLI command
+
+```bash
+napcat config set wake_preset custom
+napcat config set wake_primary cli
+napcat config set wake_cli_command 'my-agent --prompt "$(cat {prompt_file})"'
+# Placeholders: {prompt_file} (temp file path), {session}, {prompt} (inline, shell-quoted)
+```
+
+#### Disable wake entirely
+
+```bash
+napcat config set wake_preset none
+```
 
 ### Manual / debug
 
@@ -165,9 +252,90 @@ grep '\[WAKE\]' ~/.napcat-data/daemon.log    # see when/why/how wakes fired
 ```
 
 The agent replies via `napcat send` / `napcat reply` (or the skills-fs write
-path) — see `napcat_cli/data/SKILL.md`. Legacy `wake_command` shell strings still
-run as a last-resort escape hatch when no backend is configured.
+path) — see `napcat_cli/data/SKILL.md`.
 
+### Troubleshooting & verification
+
+#### Verify the full wake chain end-to-end
+
+1. **Check daemon is running:**
+   ```bash
+   ps aux | grep watch.py | grep -v grep
+   tail -5 ~/.napcat-data/daemon.log   # should show recent events
+   ```
+
+2. **Check Hermes API server is listening:**
+   ```bash
+   curl -s http://127.0.0.1:8642/health
+   # Expected: {"status": "ok", ...}
+   ```
+
+3. **Test HTTP wake manually:**
+   ```bash
+   curl -X POST http://127.0.0.1:8642/api/sessions/<SESSION_ID>/chat \
+     -H "Authorization: Bearer <KEY>" \
+     -H "Content-Type: application/json" \
+     -H "Idempotency-Key: test-001" \
+     -d '{"input": "ping"}'
+   # Expected: {"message": {"content": "..."}}  with a response
+   ```
+
+4. **Test CLI wake manually:**
+   ```bash
+   echo "hello" > /tmp/prompt.txt
+   hermes --continue napcat-qq -z "$(cat /tmp/prompt.txt)" --yolo --pass-session-id
+   # Expected: agent responds within 30-60s
+   # NOTE: -z - does NOT read stdin. Always use -z "$(cat file)" or -z "literal".
+   ```
+
+5. **Send a test @mention to the bot in a group, then check logs:**
+   ```bash
+   grep '\[WAKE\]' ~/.napcat-data/daemon.log | tail -10
+   # Should show: trigger -> queued -> delivered (or failed)
+   ```
+
+#### Common issues
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| Bot doesn't respond to @mentions | Daemon not running, or crash killed event loop | `ps aux \| grep watch.py`; check `daemon.log` for errors; restart daemon |
+| `[WAKE] delivered` but no reply | Agent received prompt but didn't act | Check Hermes session via `hermes sessions list`; verify agent has napcat skills/tools |
+| `[WAKE] failed ... timeout` | Agent took > `wake_timeout` seconds | Increase `wake_timeout` in daemon.json |
+| `[WAKE] failed ... session resolution failed` | HTTP session ID not found | Run `napcat wake sessions` to list; recreate if needed |
+| Multiple replies to one event ("split personality") | Concurrent wakes to same session | Ensure `wake_primary=auto` or `http`; the worker thread serializes wakes |
+| `hermes -z -` sends literal "-" | `-z` takes literal string, not stdin | Use `-z "$(cat {prompt_file})"` template |
+| Events stop after a bad message | Unhandled exception in event handler | Check `daemon.log` for `process() ERROR`; the handler now has try/except |
+
+#### Static analysis (prevents regressions)
+
+The test suite includes `tests/test_lint.py` which runs `pyflakes` and
+`py_compile` on every file in `napcat_cli/`. This catches undefined names,
+syntax errors, and other issues that would crash the daemon at runtime.
+
+```bash
+python -m pytest tests/test_lint.py -v
+# Should pass: test_no_undefined_names, test_all_modules_compile
+```
+
+### Image & OCR
+
+The wake prompt automatically includes image metadata when an image message is received:
+- `file_id` — image file ID
+- `url` — download URL
+- `sub_type` — image type (0=normal, 1=sticker, 7=like)
+- `file_size` — file size in bytes
+- `summary` — PaddleOCR auto-recognized text (if available)
+- `reply_id` — reply message ID (for tracking reply chains)
+
+**PaddleOCR is integrated.** Image text is auto-recognized and included in the
+`summary` field. The agent can also use multimodal vision to read the image URL
+directly. NapCat's built-in OCR is unavailable — do not use `/napcat/ocr`.
+
+| Operation | CLI | skills-fs |
+|-----------|-----|-----------|
+| Download image | `napcat get_image <url>` | `/napcat/get_image` |
+| View message detail | `napcat group <gid> get_message <mid>` | `/napcat/groups/:gid/:range/:mid/:content` |
+| Send image | `napcat send group <gid> -f <path>` | `/napcat/groups/:gid/send/image` |
 ---
 
 ## Environment Variables
@@ -188,7 +356,7 @@ to read/write NapCat API endpoints through the virtual filesystem.
 When `skills_fs_enabled` is true in `daemon.json`, the daemon spawns skills-fs
 automatically with the configured mountpoint and config file.
 
-> ⚙️ **Distribution note:** `skills-fs` is a **compiled Go binary** (git submodule
+> Distribution note: `skills-fs` is a **compiled Go binary** (git submodule
 > pinned at [`cb13f37`](https://github.com/yandu-app/skills-fs/tree/cb13f37)).
 > It is **not bundled** in the pip/uv install of `napcat-cli`. If you need the
 > FUSE mount (optional), build it separately:

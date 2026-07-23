@@ -31,35 +31,42 @@ def format_message(msg: list[dict[str, Any]]) -> str:
         data = seg.get("data", {})
 
         if seg_type == "text":
-            parts.append(data.get("text", ""))
-        elif seg_type == "at":
-            # @mention: qq is QQ number as string
-            qq = data.get("qq", "")
-            if qq:
-                parts.append(f"@{qq}")
+            text = data.get("text", "")
+            if isinstance(text, str):
+                parts.append(text)
         elif seg_type == "image":
-            # Image: file path, summary, url, file_id, sub_type
-            summary = data.get("summary", "").strip()
+            details = []
+            summary = data.get("summary", "")
+            if isinstance(summary, str):
+                summary = summary.strip()
             file_id = data.get("file", "") or data.get("file_id", "")
             url = data.get("url", "")
             sub_type = data.get("sub_type", "")
             file_size = data.get("file_size", "")
-            
-            parts.append("[图片")
-            details = []
+            ocr_text = data.get("ocr_text", "")
             if summary:
-                details.append(f"摘要: {summary}")
+                details.append(f"摘要:{summary}")
             if file_id:
-                details.append(f"file_id: {file_id}")
-            if url:
-                details.append(f"url: {url}")
+                details.append(f"id:{file_id}")
+            if url and len(url) < 200:
+                details.append(f"url:{url}")
             if sub_type:
-                details.append(f"sub_type: {sub_type}")
+                details.append(f"sub:{sub_type}")
             if file_size:
-                details.append(f"size: {file_size}")
-            if details:
-                parts.append(" " + ", ".join(details))
-            parts.append("]")
+                details.append(f"size:{file_size}")
+            if ocr_text:
+                details.append(f"OCR:{ocr_text}")
+            # Add seen/read status
+            seen = data.get("seen", 0)
+            read_ts = data.get("read_timestamp", 0)
+            status = []
+            if seen:
+                status.append("已读")
+            elif read_ts:
+                status.append("读过")
+            if status:
+                details.append(f"状态:{','.join(status)}")
+            parts.append(f"[图片{'(' + ', '.join(details) + ')' if details else ''}]")
         elif seg_type == "record":
             # Voice/audio: file, path, url
             parts.append("[语音]")
@@ -75,22 +82,35 @@ def format_message(msg: list[dict[str, Any]]) -> str:
             # QQ face emoji
             face_id = data.get("id", "")
             parts.append(f"[表情: {face_id}]")
+        elif seg_type == "forward":
+            # Forward/merged messages
+            fid = data.get("id", "")
+            if fid:
+                parts.append(f"[合并转发: {fid}]")
+            else:
+                parts.append("[合并转发]")
+        elif seg_type == "at":
+            # @ mention
+            qq = data.get("qq", "")
+            name = data.get("name", "")
+            if name:
+                parts.append(f"@{name}")
+            elif qq:
+                parts.append(f"@{qq}")
+            else:
+                parts.append("[@]")
         else:
             # Unknown segment type
             parts.append(f"[{seg_type}]")
-
     return "".join(parts)
 
 
 def extract_files(msg: list[dict[str, Any]], base_dir: str | None = None) -> list[Path]:
     """Extract file paths from image/video/record segments for agent reading.
 
-    Args:
-        msg: NapCat message segments
-        base_dir: Optional base directory for relative paths
-
-    Returns:
-        List of Path objects pointing to files referenced in the message.
+    Returns Path objects for local files AND url references.
+    If a value starts with http:// or https://, it is wrapped as a Path
+    for the agent to download via its own HTTP client.
     """
     if not isinstance(msg, list):
         return []
@@ -99,17 +119,19 @@ def extract_files(msg: list[dict[str, Any]], base_dir: str | None = None) -> lis
     for seg in msg:
         seg_type = seg.get("type", "")
         data = seg.get("data", {})
+        if not isinstance(data, dict):
+            continue
 
-        # Look for file, path, or url fields
+        if seg_type not in ("image", "video", "record"):
+            continue
+
+        # Collect file, path, url fields
         for key in ("file", "path", "url"):
-            path_str = data.get(key, "")
-            if path_str:
-                p = Path(path_str)
-                if base_dir:
-                    p = Path(base_dir) / p
-                if p.exists():
-                    files.append(p)
-                    break  # Prefer file over path over url
+            val = data.get(key, "")
+            if val and isinstance(val, str):
+                p = Path(val)
+                files.append(p)
+                break  # One file ref per segment
 
     return files
 
