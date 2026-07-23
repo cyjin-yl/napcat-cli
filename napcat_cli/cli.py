@@ -489,6 +489,9 @@ def cmd_events(args: argparse.Namespace, api: NapCatAPI) -> int:
     events = reader.read(limit=args.limit, event_type=args.type, since=args.since)
     if getattr(args, "no_heartbeat", False):
         events = [e for e in events if e.get("meta_event_type") != "heartbeat"]
+    group_filter = getattr(args, "group_id", None)
+    if group_filter:
+        events = [e for e in events if str(e.get("group_id", "")) == str(group_filter)]
 
     if args.output == "json":
         print(json.dumps(events, indent=2, ensure_ascii=False))
@@ -496,11 +499,24 @@ def cmd_events(args: argparse.Namespace, api: NapCatAPI) -> int:
         for ev in events:
             ts = ev.get("time", 0)
             ptype = ev.get("post_type", "?")
-            ntype = ev.get("notice_type", ev.get("request_type", "?"))
+            etype = ev.get("event_type") or ev.get("message_type") or ev.get("notice_type") or ev.get("request_type") or "?"
             msg = ev.get("message", ev.get("raw_message", ""))
+            # Extract plain text from message segments
+            if isinstance(msg, list):
+                text = "".join(
+                    (s.get("data") or {}).get("text", "")
+                    for s in msg if isinstance(s, dict) and s.get("type") == "text"
+                )
+                if not text:
+                    # Show segment types for non-text messages
+                    text = "[" + ", ".join(s.get("type", "?") for s in msg if isinstance(s, dict)) + "]"
+            else:
+                text = str(msg)[:100]
             sender = ev.get("sender", {})
             nickname = sender.get("nickname", "?") if isinstance(sender, dict) else "?"
-            print(f"[{ts}] {ptype}/{ntype} from {nickname}: {msg[:100]}")
+            gid = ev.get("group_id", "")
+            where = f"group/{gid}" if gid else "private"
+            print(f"[{ts}] {ptype}/{etype} {where} from {nickname}: {text[:120]}")
 
     return 0
 
@@ -1629,6 +1645,7 @@ def main() -> int:
     events_p.add_argument("--limit", "-n", type=int, default=50, help="Max events to read")
     events_p.add_argument("--output", "-o", choices=["json", "text"], default="json")
     events_p.add_argument("--no-heartbeat", action="store_true", help="Skip heartbeat events")
+    events_p.add_argument("--group", "-g", dest="group_id", default=None, help="Filter by group ID")
 
     # --- alerts ---
     alerts_p = subparsers.add_parser("alerts", help="Check or clear alerts")

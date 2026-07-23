@@ -142,7 +142,7 @@ class NapCatAPI:
         """
         import time
         now = time.time()
-        if hasattr(self, "_online_cache") and (now - self._online_cache["ts"]) < _cache_ttl:
+        if self._online_cache.get("ts") and (now - self._online_cache["ts"]) < _cache_ttl:
             return self._online_cache["online"]
 
         result = self.request("get_status", method="POST", json_body={}, timeout=5)
