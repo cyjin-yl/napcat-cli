@@ -68,10 +68,18 @@ class NapCatConfig:
         """Save config to file atomically via temp file then rename."""
         import os
         data_dir = _get_data_dir()
+        try:
+            data_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            raise FileNotFoundError(f"Cannot create data directory {data_dir}: {e}") from e
         config_file = data_dir / "config.json"
         tmp_path = config_file.with_suffix(".tmp")
-        tmp_path.write_text(json.dumps(asdict(self), indent=2, ensure_ascii=False))
-        os.replace(str(tmp_path), str(config_file))
+        try:
+            tmp_path.write_text(json.dumps(asdict(self), indent=2, ensure_ascii=False))
+            os.replace(str(tmp_path), str(config_file))
+        except FileNotFoundError:
+            # Bubble up cleanly so callers can show a friendly error.
+            raise
 
     def set(self, key: str, value: str) -> None:
         """Set a config value by key name."""

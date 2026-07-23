@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "napcat-cli"
-version = "2.0.1"
+version = "2.2.0"
 description = "Standalone CLI and daemon for NapCat QQ bot management with skills-fs integration"
 readme = "README.md"
 license = "MIT"

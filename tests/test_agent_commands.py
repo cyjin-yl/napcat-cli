@@ -15,13 +15,14 @@ REPO = Path(__file__).parent.parent
 PYTHON = sys.executable
 
 
-def _run(args: str) -> tuple[int, str, str]:
+def _run(args: str, data_dir: str = "/tmp/napcat-test-data") -> tuple[int, str, str]:
     """Run napcat CLI with given args, return (exit_code, stdout, stderr)."""
+    import os
     proc = subprocess.run(
         [PYTHON, "-m", "napcat_cli.cli"] + args.split(),
         capture_output=True, text=True, timeout=15,
         cwd=str(REPO),
-        env={**__import__("os").environ, "NAPCAT_DATA_DIR": "/tmp/napcat-test-data"},
+        env={**os.environ, "NAPCAT_DATA_DIR": data_dir},
     )
     return proc.returncode, proc.stdout, proc.stderr
 
@@ -291,3 +292,41 @@ class TestAlertsClearBackwardCompat:
         """alerts clear (subcommand) should work."""
         rc, out, err = _run("alerts clear")
         assert "invalid choice" not in err, f"alerts clear failed: {err}"
+
+
+class TestFoundBugFixes2:
+    """TDD tests for 7 bugs found by TestExploreNewPaths agent."""
+
+    def test_wake_subcommand_registered(self):
+        """Bug 1: napcat wake must be in commands dispatch."""
+        rc, out, err = _run("wake --reason test")
+        assert "Available commands" not in out, "wake subcommand not in dispatch"
+        assert "unknown command" not in (err or "").lower()
+
+    def test_friend_info_handler_exists(self):
+        """Bug 3: cmd_friend must handle 'info' subcommand."""
+        rc, out, err = _run("friend info 3914024488")
+        assert "Unknown friend command" not in err, (
+            f"friend info not handled: {err}"
+        )
+
+    def test_phone_events(self):
+        """Bug 4: napcat phone events must not raise AttributeError on type."""
+        rc, out, err = _run("phone events")
+        assert "AttributeError" not in (err or ""), f"phone events crash: {err}"
+
+    def test_phone_alerts(self):
+        """Bug 6: napcat phone alerts must not raise AttributeError on limit."""
+        rc, out, err = _run("phone alerts")
+        assert "AttributeError" not in (err or ""), f"phone alerts crash: {err}"
+
+    def test_phone_msg(self):
+        """Bug 5: napcat phone msg must not raise AttributeError on target_type."""
+        rc, out, err = _run("phone msg group 12345 hello")
+        assert "AttributeError" not in (err or ""), f"phone msg crash: {err}"
+
+    def test_data_dir_nonexistent_clean_error(self):
+        """Bug 7: --data-dir with nonexistent path must show clean error."""
+        rc, out, err = _run("--data-dir /nonexistent/path/xyz123 status",
+                            data_dir="/nonexistent/path/xyz123")
+        assert "Traceback" not in (err or ""), f"data_dir crash: {err}"

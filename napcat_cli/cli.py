@@ -19,6 +19,8 @@ Environment:
 """
 from __future__ import annotations
 
+import sqlite3
+
 from napcat_cli.__init__ import __version__
 import argparse
 import json
@@ -336,6 +338,8 @@ def cmd_friend(args: argparse.Namespace, api: NapCatAPI) -> int:
               "Friend requests can only be approved/rejected via 'napcat api' using "
               "set_friend_add_request with the flag from an incoming request event.", file=sys.stderr)
         return 1
+    elif sub == "info":
+        result = api.call("get_stranger_info", user_id=args.user_id, no_cache=args.no_cache)
     elif sub == "delete":
         result = api.call("delete_friend", user_id=args.user_id)
     else:
@@ -646,8 +650,16 @@ def cmd_config(args: argparse.Namespace, api: NapCatAPI) -> int:
         return 0
 
     elif args.subcommand == "set":
-        cfg.set(args.key, args.value)
-        cfg.save()
+        try:
+            cfg.set(args.key, args.value)
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
+        try:
+            cfg.save()
+        except FileNotFoundError as e:
+            print(f"Error: cannot save config — data directory does not exist: {e}", file=sys.stderr)
+            return 1
         print(f"Set {args.key} = {args.value}", file=sys.stderr)
         return 0
 
@@ -709,8 +721,10 @@ def cmd_status(args: argparse.Namespace, api: NapCatAPI) -> int:
     cfg = get_config()
     if cfg.self_id is None:
         cfg.self_id = str(login["data"].get("user_id", ""))
-        cfg.save()
-
+        try:
+            cfg.save()
+        except FileNotFoundError as e:
+            print(f"Warning: could not persist self_id: {e}", file=sys.stderr)
     # Print full JSON
     print(json.dumps({"login": login["data"], "status": data}, indent=2, ensure_ascii=False))
 
@@ -1074,11 +1088,18 @@ def cmd_phone(args: argparse.Namespace, api: NapCatAPI) -> int:
             args.subcommand = "show"
             return cmd_config(args, api)
         elif subcmd == "alerts":
-            return cmd_alerts(args, api)
+            fake_args = argparse.Namespace(limit=getattr(args, "limit", 30), json=False)
+            return cmd_alerts(fake_args, api)
         elif subcmd == "events":
             limit = getattr(args, "limit", 50)
             no_hb = getattr(args, "no_heartbeat", False)
-            fake_args = argparse.Namespace(limit=limit, no_heartbeat=no_hb, output=None, output_file=None, event_type=None, since=None, json=False, text=False, array=False)
+            fake_args = argparse.Namespace(
+                limit=limit, no_heartbeat=no_hb,
+                output=None, output_file=None,
+                type=None, event_type=None,  # Bug 4: cmd_events needs args.type
+                since=None, group_id=None,
+                json=False,
+            )
             return cmd_events(fake_args, api)
         elif subcmd == "msg":
             target_type = getattr(args, "target_type", None)
@@ -1087,7 +1108,17 @@ def cmd_phone(args: argparse.Namespace, api: NapCatAPI) -> int:
             if not all([target_type, target_id, message]):
                 print("Error: target_type, target_id, and message are required", file=sys.stderr)
                 return 1
-            fake_args = argparse.Namespace(message_type=target_type, target_id=str(target_id), message=message, at=[], file=None, image=None, json=False)
+            file_path = getattr(args, "file", None)
+            image_path = getattr(args, "image", None)
+            at_list = getattr(args, "at", []) or []
+            fake_args = argparse.Namespace(
+                target_type=target_type,  # Bug 5: cmd_send needs target_type, not message_type
+                target_id=str(target_id),
+                message_text=message,
+                message=message,
+                at=at_list, file=file_path, image=image_path,
+                json=False,
+            )
             return cmd_send(fake_args, api)
         else:
             print(f"Unknown phone subcommand: {subcmd}", file=sys.stderr)
@@ -1948,12 +1979,19 @@ def main() -> int:
         "get_stranger_info": cmd_get_stranger_info,
         "get_image": cmd_get_image,
         "get_message": cmd_get_message,
+        "wake": cmd_wake,
         "setup": lambda a, api: __import__("napcat_cli.setup_wizard", fromlist=["run_setup"]).run_setup(a.non_interactive, a.yes, a.force),
     }
-
     handler = commands.get(args.command)
     if handler:
-        return handler(args, api)
+        try:
+            return handler(args, api)
+        except FileNotFoundError as e:
+            print(f"Error: data directory issue — {e}", file=sys.stderr)
+            return 1
+        except (OSError, sqlite3.OperationalError) as e:
+            print(f"Error: cannot access data — {e}", file=sys.stderr)
+            return 1
     else:
         parser.print_help()
         return 1
