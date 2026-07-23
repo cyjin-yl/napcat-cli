@@ -304,6 +304,8 @@ def cmd_group(args: argparse.Namespace, api: NapCatAPI) -> int:
         result = api.call("send_poke", group_id=args.group_id, user_id=args.user_id)
         if result.get("retcode") == 200 and result.get("data") is None:
             print("Group poke is not supported by this NapCat instance.", file=sys.stderr)
+    elif sub == "get_message":
+        result = api.call("get_msg", message_id=int(args.message_id))
     else:
         print(f"Unknown group command: {sub}", file=sys.stderr)
         return 1
@@ -903,6 +905,37 @@ def cmd_get_stranger_info(args: argparse.Namespace, api: NapCatAPI) -> int:
     return 0 if result.get("retcode") == 0 else 1
 
 
+def cmd_get_image(args: argparse.Namespace, api: NapCatAPI) -> int:
+    """napcat get_image <url> - Download an image by URL."""
+    import urllib.request
+    import os
+    url = args.url
+    if not url:
+        print("Error: URL is required", file=sys.stderr)
+        return 1
+    # Download to /tmp
+    filename = url.split("/")[-1].split("?")[0] or "image.jpg"
+    if not os.path.splitext(filename)[1]:
+        filename += ".jpg"
+    output = args.output or f"/tmp/napcat_{filename}"
+    try:
+        urllib.request.urlretrieve(url, output)
+        print(output)
+        return 0
+    except Exception as e:
+        print(f"Error downloading image: {e}", file=sys.stderr)
+        return 1
+
+
+def cmd_get_message(args: argparse.Namespace, api: NapCatAPI) -> int:
+    """napcat get_message <message_id> - Get message details by ID."""
+    if not require_online(api):
+        return 1
+    result = api.call("get_msg", message_id=int(args.message_id))
+    print(json.dumps(result, indent=2, ensure_ascii=False))
+    return 0 if result.get("retcode") == 0 else 1
+
+
 def cmd_react(args: argparse.Namespace, api: NapCatAPI) -> int:
     """napcat react - Send emoji reaction on a group message."""
     if not require_online(api):
@@ -1487,7 +1520,7 @@ def main() -> int:
     send_p.add_argument("target_type", choices=["group", "private"])
     send_p.add_argument("target_id", help="Group ID or user ID")
     send_p.add_argument("message", nargs="?", help="Message text (or use --message)")
-    send_p.add_argument("--message", dest="message_text", help="Message text")
+    send_p.add_argument("--message", "-m", dest="message_text", help="Message text")
     send_p.add_argument("--at", action="append", help="QQ number to @ (repeatable)")
     send_p.add_argument("--file", help="File to send")
     send_p.add_argument("--image", help="Image to send")
@@ -1499,7 +1532,7 @@ def main() -> int:
     reply_p.add_argument("target_id", help="Group ID or user ID")
     reply_p.add_argument("message_id", help="Message ID to reply to")
     reply_p.add_argument("message", nargs="?", help="Reply text (or use --message)")
-    reply_p.add_argument("--message", dest="message_text", help="Reply text")
+    reply_p.add_argument("--message", "-m", dest="message_text", help="Reply text")
     reply_p.add_argument("--at", action="append", help="QQ number to @ (repeatable)")
     reply_p.add_argument("--file", help="File to attach")
     reply_p.add_argument("--image", help="Image to attach")
@@ -1583,6 +1616,9 @@ def main() -> int:
     gdes = group_sub.add_parser("delete_essence", help="Delete an essence message")
     gdes.add_argument("group_id")
     gdes.add_argument("message_id")
+    ggm = group_sub.add_parser("get_message", help="Get message details by ID")
+    ggm.add_argument("group_id")
+    ggm.add_argument("message_id")
 
 
     # --- friend ---
@@ -1800,6 +1836,15 @@ def main() -> int:
     gsi.add_argument("user_id")
     gsi.add_argument("--no-cache", action="store_true", default=False, help="Force fresh query")
 
+    # --- get_image ---
+    gi = subparsers.add_parser("get_image", help="Download an image by URL")
+    gi.add_argument("url", help="Image URL to download")
+    gi.add_argument("--output", "-o", default=None, help="Output file path (default: /tmp/napcat_<filename>)")
+
+    # --- get_message ---
+    gm = subparsers.add_parser("get_message", help="Get message details by message ID")
+    gm.add_argument("message_id", help="Message ID to retrieve")
+    gm.add_argument("--group", dest="group_id", default=None, help="Group ID (for context)")
     # --- fs ---
     subparsers.add_parser("fs", help="Show skills-fs directory tree and workflow")
 
@@ -1870,7 +1915,8 @@ def main() -> int:
         "schedule": cmd_schedule,
         "get_cookies": cmd_get_cookies,
         "get_stranger_info": cmd_get_stranger_info,
-        "wake": cmd_wake,
+        "get_image": cmd_get_image,
+        "get_message": cmd_get_message,
         "setup": lambda a, api: __import__("napcat_cli.setup_wizard", fromlist=["run_setup"]).run_setup(a.non_interactive, a.yes, a.force),
     }
 
