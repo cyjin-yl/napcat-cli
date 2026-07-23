@@ -10,9 +10,12 @@ Two built-in backends:
 - :class:`HttpWakeBackend` — generic HTTP POST with Bearer auth and an optional
   ``Idempotency-Key`` header. The Hermes API Server preset targets
   ``POST /api/sessions/{id}/chat`` (verified working per the Hermes API docs).
-- :class:`CliWakeBackend` — generic shell command rendered via
+- :class:`CliWakeBackend` — **LEGACY / not recommended** — generic shell command rendered via
   :func:`napcat_cli.wake.render_wake_command`. The Hermes preset targets
   ``hermes --continue <session> -z <prompt> --yolo --pass-session-id``.
+  Prefer :class:`HttpWakeBackend` for all production use — CLI has known
+  unreliability (process-spawn latency, quoting hazards, no idempotency,
+  new-session drift).
 
 Backends use only the standard library (``urllib``, ``subprocess``).
 """

@@ -76,3 +76,42 @@ above. **Never disable or skip these tests.**
    the event loop.
 5. **When editing a function, re-read the full function body** after the edit to
    verify no variables were orphaned or duplicated.
+
+## Message ID-only paths (no group_id needed)
+
+You can operate on messages using just the message_id. New in v2.1.0:
+
+### skills-fs (FUSE mount)
+
+Write to these paths directly with `echo '{"text": "..."}' > napcat/messages/:message_id/reply/text`:
+
+| Path | Action | Description |
+|------|--------|-------------|
+| messages/:mid | read | Get message content by message_id only |
+| messages/:mid/reply/text | write | Reply with smart text (auto-parses CQ codes) |
+| messages/:mid/reply/text_raw | write | Reply with raw plain text |
+| messages/:mid/reply/image | write | Reply with an image |
+| messages/:mid/reply/cqcode | write | Reply with CQ code string |
+| messages/:mid/reply/at | write | Reply with @-mention |
+| messages/:mid/reply/json | write | Reply with full segments JSON |
+| messages/:mid/image | read | Get image URL/file info from message |
+
+### CLI equivalents
+
+- `napcat get_message <mid>` - get message content
+- `napcat get_image <url>` - download image by URL
+- `napcat group <gid> get_message <mid>` - get message in group context
+- `napcat reply group <gid> <mid> -m "text"` / `napcat reply private <uid> <mid> -m "text"` - reply to message
+
+### HTTP provider invoke
+
+```
+POST /invoke {"action": "reply_by_mid_text", "params": {"message_id": "...", "text": "..."}}
+GET  /invoke?action=get_message_by_mid&message_id=...
+GET  /invoke?action=get_image_by_mid&message_id=...
+```
+
+### Notes
+- QQ image URLs have hotlinking protection. Always use `napcat get_image <url>` or skills-fs `/napcat/get_image` to download images before analyzing them. Direct URL access (e.g. vision_analyze) will fail.
+- The reply_by_mid_* actions auto-resolve whether the message is from a group or private chat.
+- If you already know the group_id, the groups/:gid/:range/:mid/ paths are equivalent but faster (no DB lookup).

@@ -48,7 +48,7 @@ napcat daemon status               # daemon + recent log
 `napcat friend {list|remark|info|delete} ...` · `napcat send_poke` · `napcat send_forward` · `napcat api <endpoint> [-d JSON]`
 
 ### Wake / debug
-`napcat wake test` · `napcat wake --dry-run` · `napcat wake --reason AT_ME --prompt "..."`
+`napcat wake test` · `napcat wake --dry-run` · `napcat wake --transport http` (recommended; CLI transport is legacy / not recommended)
 
 ### Persona
 On QQ, reply in persona — load `~/.napcat-data/skills/persona.md` first. Do **not** say "我是AI".

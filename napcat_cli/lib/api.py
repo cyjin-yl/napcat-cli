@@ -21,7 +21,9 @@ class NapCatAPI:
         self.token = token or os.environ.get("NAPCAT_TOKEN") or cfg.token
         self.timeout = timeout if timeout is not None else 30
         self.echo_counter = 0
-        self._online_cache: dict = {}
+        # Pre-populate cache so is_online() can read "ts"/"online" even on first call.
+        # is_online() refreshes this dict once a real probe completes.
+        self._online_cache: dict = {"ts": 0, "online": False}
 
         # Load or create API availability cache
 

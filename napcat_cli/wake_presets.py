@@ -56,6 +56,7 @@ def build_waker(cfg: NapCatConfig) -> Waker:
 
     if preset == "hermes":
         # Hermes defaults fill empty fields; http is optional (needs key), cli is on by default.
+        # CLI is LEGACY / not recommended — prefer HTTP.
         http = _http_backend(cfg, fill_defaults=True)
         cli = _cli_backend(cfg, fill_defaults=True)
         if http:

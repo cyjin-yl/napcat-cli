@@ -153,7 +153,7 @@ napcat daemon status
 | `napcat setup` | Interactive wizard: configure NapCat connection, skills-fs, and wake agent |
 | `napcat setup --non-interactive` | Non-interactive setup with all defaults (useful in scripts) |
 | `napcat setup --yes` | Auto-accept all prompts without confirmation |
-| `napcat wake [--reason R] [--prompt P] [--transport T]` | Wake the agent (HTTP/CLI, auto-fallback); daemon also calls it automatically on events |
+| `napcat wake [--reason R] [--prompt P] [--transport T]` | Wake the agent (HTTP recommended; CLI is legacy / not recommended); daemon also calls it automatically on events |
 | `napcat wake test` / `napcat wake sessions` | Probe transports / list Hermes sessions |
 | `napcat wake --dry-run` | Render the HTTP request + CLI command without executing |
 | `napcat config get <key>` | Read a config key (api_url, token, wake_command, etc.) |
@@ -165,7 +165,7 @@ Runs an interactive wizard that configures:
 1. **NapCat connection** — API URL (default `http://127.0.0.1:18801`) and token (validated against the running instance).
 2. **Data directory** — default `~/.napcat-data`.
 3. **skills-fs** — mountpoint, config path, binary detection. Guides you to build or download the Go binary if missing.
-4. **Wake agent** — choose `hermes` (default), `custom`, or `none`. Hermes uses the CLI one-shot transport (`hermes --continue <session> -z …`) by default; the HTTP API server is opt-in. Wake is pluggable — any HTTP endpoint or shell command works.
+4. **Wake agent** — choose `hermes` (default), `custom`, or `none`. Hermes defaults to the CLI one-shot transport; **CLI is LEGACY / not recommended** — enable the HTTP API server for a reliable wake (`wake_primary=http`). Custom and HTTP-endpoint setups are fully supported; the shell-command backend is kept for experimental/legacy use only.
 5. **Install skill** — copies this SKILL.md into `~/.hermes/skills/napcat-cli/` for Hermes to discover.
 
 Use `--non-interactive` to skip all prompts (uses defaults). Use `--yes` to auto-confirm actions.
@@ -348,8 +348,8 @@ A: AT_ME/DM_ME/REPLY_TO_ME 绕过冷却，可能导致频繁唤醒。可在配�
 - Other events (`NEW_FRIEND`, `NEW_REQUEST`, `BOT_BANNED`, `NEW_POKE`, …) are
   debounced; you'll perceive them within a reasonable window.
 
-Wake is **pluggable** (HTTP API server or CLI one-shot, auto-fallback); Hermes is
-the default preset but not required. Manual / debug:
+Wake is **pluggable** (HTTP API server recommended; CLI one-shot is legacy / not recommended).
+Hermes is the default preset but not required. Manual / debug:
 
 ```bash
 napcat wake                            # manual wake, contextual default prompt

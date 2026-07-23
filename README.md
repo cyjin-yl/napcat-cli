@@ -84,10 +84,9 @@ preset; any HTTP endpoint or shell command works.
 QQ Event (WS) --> EventProcessor --> WakeOrchestrator (debounce/cooldown/queue)
                                           |
                                      Waker (auto-fallback)
-                                    /              \
-                          HTTP API (preferred)    CLI (fallback)
-                          POST /chat              hermes -z "..."
-                          fixed session_id        --continue <session>
+                          HTTP API (RECOMMENDED)        CLI (LEGACY — 不推荐)
+                          POST /chat                    hermes -z "..."
+                          fixed session_id              --continue <session>
 ```
 
 - **Debounce** (`wake_debounce_seconds`, default 3): coalesces a burst of same-reason events into one wake.
@@ -113,12 +112,23 @@ Every wake is logged to `daemon.log`:
 
 AT_ME detection supports all NapCat message formats: CQ code (`[CQ:at,qq=...]`), display name (`@name (qq)`), and message segments (`{"type":"at","data":{"qq":"..."}}`).
 
-### Two transports, auto-fallback
+### Two transports — HTTP recommended, CLI legacy
 
-| Transport | When it's used | Needs |
-|-----------|----------------|-------|
-| **HTTP API server** (preferred) | When `wake_http_url` + `wake_http_key` are set | Agent's HTTP API endpoint |
-| **CLI one-shot** (fallback) | Always available | Agent CLI on PATH |
+> ⚠️ **Wake transport recommendation.** The **HTTP API server is the recommended
+> transport** for agent wake. The CLI one-shot backend is kept as a **legacy
+> fallback** for environments where running the API server isn't viable — it is
+> known to be **less reliable** (process-spawn latency, quoting hazards,
+> new-session drift, no idempotency). When `wake_primary=auto` falls back to
+> CLI because HTTP is unreachable, the wake may appear to succeed but never
+> deliver the prompt (only HTTP returns a real `delivered` in `daemon.log`).
+> **Enable the HTTP API server first** — only keep CLI for diagnostic
+> `--dry-run` or as last-resort fallback. See `AGENTS.md` "Critical Lessons —
+> `hermes -z -`" for the most common CLI failure mode.
+
+| Transport | Status | When it picks | Needs |
+|-----------|--------|---------------|-------|
+| **HTTP API server** | **RECOMMENDED** | `primary=http` or `primary=auto` when configured + reachable | `wake_http_url` + `wake_http_key` (bearer) |
+| **CLI one-shot** | **LEGACY / 不推荐** | `primary=cli` (forced) or `primary=auto` only if HTTP is **not configured/unreachable** as a last-resort fallback | Agent CLI on PATH |
 
 `wake_primary=auto` tries HTTP first (if configured + reachable), else falls back to CLI.
 
@@ -179,7 +189,6 @@ Or edit `~/.napcat-data/daemon.json` directly:
   "wake_http_url": "http://127.0.0.1:8642",
   "wake_http_key": "<API_SERVER_KEY>",
   "wake_http_session_id": "<SESSION_ID>",
-  "wake_session": "napcat-qq",
   "wake_timeout": 300.0,
   "wake_cli_command": "hermes --continue {session} -z \"$(cat {prompt_file})\" --yolo --pass-session-id"
 }
@@ -189,7 +198,17 @@ Key env vars (also checked by Hermes preset, in priority order):
 - `NAPCAT_WAKE_HTTP_KEY` — HTTP API bearer token
 - `HERMES_API_KEY` — alias for the above
 
-#### Option B: CLI one-shot (simpler, less reliable)
+#### Option B: CLI one-shot — **LEGACY / 不推荐**
+
+> ⚠️ **Not recommended.** Prefer **Option A** (HTTP). The CLI backend is kept
+> for environments where running the API server isn't viable, but it has
+> multiple known failure modes (process-spawn latency, quoting hazards, no
+> idempotency, new-session drift). When `wake_primary=auto` falls back to CLI
+> after an HTTP probe fails, the wake often **appears** to succeed but never
+> delivers the prompt to the agent. Diagnose by running
+> `grep '\[WAKE\]' ~/.napcat-data/daemon.log` — only the HTTP backend writes a
+> `delivered ... transport=http -> 200` line. For agents other than HTTP,
+> configure Option A first; only fall back to CLI when there is no other choice.
 
 If you don't want to run the API server, napcat-cli can invoke the Hermes CLI
 directly. The CLI backend writes the prompt to a temp file and passes it via
@@ -224,7 +243,12 @@ napcat config set wake_http_key my-secret-key
 # If your endpoint uses a different path/body format, see wake_backend.py HttpWakeBackend
 ```
 
-#### Custom CLI command
+#### Custom CLI command — **LEGACY / 不推荐**
+
+> ⚠️ **Not recommended.** The shell-command backend is kept for legacy /
+> experimental setups only. Prefer **Custom HTTP endpoint** above — see the
+> "Two transports — HTTP recommended, CLI legacy" note at the top of this
+> section for why.
 
 ```bash
 napcat config set wake_preset custom
@@ -239,12 +263,13 @@ napcat config set wake_cli_command 'my-agent --prompt "$(cat {prompt_file})"'
 napcat config set wake_preset none
 ```
 
+
 ### Manual / debug
 
 ```bash
 napcat wake                           # reason: manual, contextual default prompt
 napcat wake --reason AT_ME --prompt "hello"
-napcat wake --transport cli           # force a transport for this wake
+napcat wake --transport http          # recommended; --transport cli is legacy
 napcat wake --dry-run                 # render the HTTP request + CLI command without executing
 napcat wake test                      # per-transport configured + reachable probe
 napcat wake sessions                  # list Hermes sessions (HTTP backend)
@@ -280,7 +305,11 @@ path) — see `napcat_cli/data/SKILL.md`.
    # Expected: {"message": {"content": "..."}}  with a response
    ```
 
-4. **Test CLI wake manually:**
+4. **Test CLI wake manually (legacy — prefer HTTP test above):**
+   > ⚠️ CLI is **legacy / not recommended**. This reference is kept for
+   > diagnosing environments where the HTTP API server is genuinely unavailable.
+   > Only test CLI as a last resort — the HTTP test (step 3) is the one that
+   > matters.
    ```bash
    echo "hello" > /tmp/prompt.txt
    hermes --continue napcat-qq -z "$(cat /tmp/prompt.txt)" --yolo --pass-session-id
@@ -302,7 +331,7 @@ path) — see `napcat_cli/data/SKILL.md`.
 | `[WAKE] delivered` but no reply | Agent received prompt but didn't act | Check Hermes session via `hermes sessions list`; verify agent has napcat skills/tools |
 | `[WAKE] failed ... timeout` | Agent took > `wake_timeout` seconds | Increase `wake_timeout` in daemon.json |
 | `[WAKE] failed ... session resolution failed` | HTTP session ID not found | Run `napcat wake sessions` to list; recreate if needed |
-| Multiple replies to one event ("split personality") | Concurrent wakes to same session | Ensure `wake_primary=auto` or `http`; the worker thread serializes wakes |
+| Multiple replies to one event ("split personality") | Concurrent wakes to same session | Set `wake_primary=http` (or ensure HTTP probe passes); the worker thread serializes wakes through HTTP's fixed session, but CLI one-shot can still create drift |
 | `hermes -z -` sends literal "-" | `-z` takes literal string, not stdin | Use `-z "$(cat {prompt_file})"` template |
 | Events stop after a bad message | Unhandled exception in event handler | Check `daemon.log` for `process() ERROR`; the handler now has try/except |
 

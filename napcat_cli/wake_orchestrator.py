@@ -234,20 +234,20 @@ def build_prompt(reason: str, events: list[dict]) -> str:
         # Build context-aware prompt with exploration hints
         context_hint = ""
         if image_meta:
-            context_hint += (
-                "\n[图片处理提示] 此消息包含图片。图片 URL 已在上方提供。"
-                "如需下载本地分析，可用 `napcat get_image <url>` (CLI) 或写入 `/napcat/get_image` (skills-fs)。"
+            context_hint = (
+                "\n[图片处理提示] 此消息包含图片。注意：QQ图片URL有防盗链限制，不可直接访问。"
+                "必须先用 `napcat get_image <url>` (CLI) 或写入 `/napcat/get_image` (skills-fs) 下载到本地，"
+                "然后再进行 PaddleOCR 文字识别或多模态视觉分析。"
             )
         # Encourage proactive context gathering
         explore_hint = (
             "\n[建议] 收到消息后，建议："
             "1) 先读取上下文（用 napcat events/alerts 或 skills-fs 查看最近 10-20 条）"
-            "2) 有图片 -> 直接用多模态视觉看 URL，或用 CLI `napcat get_image <url>` / FS `/napcat/get_image` 下载后用 PaddleOCR/多模态识别"
+            "2) 有图片 -> QQ图片URL有防盗链限制，不可直接访问。必须用 CLI `napcat get_image <url>` / FS `/napcat/get_image` 下载后，再用 PaddleOCR/多模态分析"
             "3) 有合并转发/回复链 -> 用 CLI `napcat group <gid> get_message <mid>` 或 FS `/napcat/groups/:gid/:range/:mid/:content` 拉取完整内容"
             "4) 回复方式：CLI `napcat reply <mid> -m \"内容\"` / `napcat send group <gid> -m \"内容\"` / `napcat send private <uid> -m \"内容\"`；FS 写入 `/napcat/groups/:gid/:range/:mid/reply/text` (智能文本，自动识别 CQ 码/at/图片) 或 `/reply/text_raw` (纯文本) / `/reply/image` / `/reply/json` 等"
             "5) 再决定如何回复"
         )
-        
         # Include read event IDs and seen/read status
         read_event_ids = []
         seen_status = {}

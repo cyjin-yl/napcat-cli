@@ -1110,7 +1110,16 @@ class NapCatHandler(BaseHTTPRequestHandler):
                 "list_messages", "get_message", "get_stats",
                 "list_message_content", "get_message_content", "describe_action",
             }
-            action = _first("action")
+            # Strip the first 'action' (used for routing); keep subsequent 'action' params (used as action_name for describe_action).
+            qs_items = list(qs.items())
+            routing_action = qs_items[0][1][0] if qs_items else ""
+            # If URL has two 'action' query keys, second one = action_name to describe
+            action_name_for_describe = ""
+            for k, v in qs_items:
+                if k == "action" and len(v) >= 2:
+                    action_name_for_describe = v[1]
+                    break
+            action = routing_action
             if not action:
                 self._send_error(400, "Missing action parameter")
                 return
@@ -1118,6 +1127,8 @@ class NapCatHandler(BaseHTTPRequestHandler):
                 self._send_error(403, f"Action '{action}' not allowed via GET (use POST for write actions)")
                 return
             params = {k: v[0] if len(v) == 1 else v for k, v in qs.items() if k != "action"}
+            if action == "describe_action" and action_name_for_describe:
+                params["action"] = action_name_for_describe
             try:
                 result = self._dispatch(action, params)
                 self._send_json(result)
@@ -1815,6 +1826,187 @@ class NapCatHandler(BaseHTTPRequestHandler):
             msg = [{"type": "reply", "data": {"id": str(message_id)}}] + message
             r = api.call("send_msg", message_type="private", user_id=int(user_id) if user_id.isdigit() else user_id, message=msg)
             return self._format_send_result(r)
+
+        # ---- resolve message_id to context ----
+        def _resolve_message(message_id: str) -> dict:
+            """Look up message_id in events DB, return {group_id, user_id, message_type, raw_event} or error."""
+            row = db.execute(
+                "SELECT group_id, user_id, message_type, raw_json FROM events WHERE post_type='message' AND message_id = ?",
+                [message_id]
+            ).fetchone()
+            if not row:
+                return {"error": f"Message {message_id} not found in events database"}
+            return {
+                "group_id": str(row["group_id"]) if row["group_id"] else None,
+                "user_id": str(row["user_id"]) if row["user_id"] else None,
+                "message_type": row["message_type"],
+                "raw_event": json.loads(row["raw_json"]) if row["raw_json"] else None,
+            }
+
+        # ---- reply_by_mid_* (message_id-only, auto-resolve context) ----
+        if action == "reply_by_mid_text":
+            message_id = str(params.get("message_id", ""))
+            payload = self._resolve_payload(params, "text")
+            if not message_id or not payload:
+                return {"error": "message_id and text payload are required"}
+            ctx = _resolve_message(message_id)
+            if "error" in ctx:
+                return ctx
+            from napcat_cli.lib.api import NapCatAPI
+            api = NapCatAPI()
+            msg = self._compose_message("smart_text", payload)
+            msg = [{"type": "reply", "data": {"id": str(message_id)}}] + (msg if isinstance(msg, list) else [msg])
+            if ctx["group_id"]:
+                r = api.call("send_msg", message_type="group", group_id=int(ctx["group_id"]), message=msg)
+            else:
+                r = api.call("send_msg", message_type="private", user_id=int(ctx["user_id"]), message=msg)
+            return self._format_send_result(r)
+
+        if action == "reply_by_mid_text_raw":
+            message_id = str(params.get("message_id", ""))
+            payload = self._resolve_payload(params, "text")
+            if not message_id or not payload:
+                return {"error": "message_id and text payload are required"}
+            ctx = _resolve_message(message_id)
+            if "error" in ctx:
+                return ctx
+            warning = None
+            if self._has_cq_codes(payload):
+                warning = "WARNING: CQ codes detected in /text_raw payload; they will be sent as literal text."
+            from napcat_cli.lib.api import NapCatAPI
+            api = NapCatAPI()
+            msg = self._compose_message("text", payload)
+            msg = [{"type": "reply", "data": {"id": str(message_id)}}] + (msg if isinstance(msg, list) else [msg])
+            if ctx["group_id"]:
+                r = api.call("send_msg", message_type="group", group_id=int(ctx["group_id"]), message=msg)
+            else:
+                r = api.call("send_msg", message_type="private", user_id=int(ctx["user_id"]), message=msg)
+            result = self._format_send_result(r)
+            if warning:
+                result["warning"] = warning
+            return result
+
+        if action == "reply_by_mid_image":
+            message_id = str(params.get("message_id", ""))
+            payload = self._resolve_payload(params, "path")
+            if not message_id or not payload:
+                return {"error": "message_id and image path are required"}
+            ctx = _resolve_message(message_id)
+            if "error" in ctx:
+                return ctx
+            from napcat_cli.lib.api import NapCatAPI
+            api = NapCatAPI()
+            try:
+                img = self._compose_message("image", payload)
+            except ValueError as e:
+                return {"error": str(e)}
+            msg = [{"type": "reply", "data": {"id": str(message_id)}}] + (img if isinstance(img, list) else [img])
+            if ctx["group_id"]:
+                r = api.call("send_msg", message_type="group", group_id=int(ctx["group_id"]), message=msg)
+            else:
+                r = api.call("send_msg", message_type="private", user_id=int(ctx["user_id"]), message=msg)
+            return self._format_send_result(r)
+
+        if action == "reply_by_mid_cqcode":
+            message_id = str(params.get("message_id", ""))
+            payload = self._resolve_payload(params, "cqcode")
+            if not message_id or not payload:
+                return {"error": "message_id and CQ code payload are required"}
+            ctx = _resolve_message(message_id)
+            if "error" in ctx:
+                return ctx
+            from napcat_cli.lib.api import NapCatAPI
+            api = NapCatAPI()
+            cq_str = self._compose_message("cqcode", payload)
+            msg = [{"type": "reply", "data": {"id": str(message_id)}}, {"type": "text", "data": {"text": cq_str}}]
+            if ctx["group_id"]:
+                r = api.call("send_msg", message_type="group", group_id=int(ctx["group_id"]), message=msg)
+            else:
+                r = api.call("send_msg", message_type="private", user_id=int(ctx["user_id"]), message=msg)
+            return self._format_send_result(r)
+
+        if action == "reply_by_mid_at":
+            message_id = str(params.get("message_id", ""))
+            qq = str(params.get("qq", ""))
+            text = str(params.get("text", ""))
+            if not message_id or not qq:
+                return {"error": "message_id and qq are required"}
+            ctx = _resolve_message(message_id)
+            if "error" in ctx:
+                return ctx
+            from napcat_cli.lib.api import NapCatAPI
+            api = NapCatAPI()
+            base = self._compose_message("at", None, qq=qq, text=text)
+            msg = [{"type": "reply", "data": {"id": str(message_id)}}] + (base if isinstance(base, list) else [base])
+            if ctx["group_id"]:
+                r = api.call("send_msg", message_type="group", group_id=int(ctx["group_id"]), message=msg)
+            else:
+                r = api.call("send_msg", message_type="private", user_id=int(ctx["user_id"]), message=msg)
+            return self._format_send_result(r)
+
+        if action == "reply_by_mid_json":
+            message_id = str(params.get("message_id", ""))
+            message = params.get("message", "")
+            if not message_id or not message:
+                return {"error": "message_id and message are required"}
+            ctx = _resolve_message(message_id)
+            if "error" in ctx:
+                return ctx
+            from napcat_cli.lib.api import NapCatAPI
+            api = NapCatAPI()
+            if isinstance(message, str):
+                try:
+                    message = json.loads(message)
+                except json.JSONDecodeError:
+                    return {"error": "message must be valid JSON"}
+            msg = [{"type": "reply", "data": {"id": str(message_id)}}] + (message if isinstance(message, list) else [message])
+            if ctx["group_id"]:
+                r = api.call("send_msg", message_type="group", group_id=int(ctx["group_id"]), message=msg)
+            else:
+                r = api.call("send_msg", message_type="private", user_id=int(ctx["user_id"]), message=msg)
+            return self._format_send_result(r)
+
+        # ---- get by message_id (no group_id needed) ----
+        if action == "get_message_by_mid":
+            message_id = str(params.get("message_id", ""))
+            if not message_id:
+                return {"error": "message_id is required"}
+            ctx = _resolve_message(message_id)
+            if "error" in ctx:
+                return ctx
+            event = ctx.get("raw_event") or {}
+            from napcat_cli.lib.message import format_message, extract_file_paths
+            msg = event.get("message", [])
+            event["formatted_text"] = format_message(msg)
+            event["files"] = extract_file_paths(msg)
+            event["group_id"] = ctx["group_id"]
+            event["user_id"] = ctx["user_id"]
+            event["message_type"] = ctx["message_type"]
+            return event
+
+        if action == "get_image_by_mid":
+            """Get image URL by message_id (returns first image segment's data)."""
+            message_id = str(params.get("message_id", ""))
+            if not message_id:
+                return {"error": "message_id is required"}
+            ctx = _resolve_message(message_id)
+            if "error" in ctx:
+                return ctx
+            event = ctx.get("raw_event") or {}
+            msg = event.get("message", [])
+            images = []
+            for seg in msg:
+                if isinstance(seg, dict) and seg.get("type") == "image":
+                    data = seg.get("data", {}) or {}
+                    images.append({
+                        "url": data.get("url", ""),
+                        "file": data.get("file", "") or data.get("file_id", ""),
+                        "summary": data.get("summary", ""),
+                        "file_size": data.get("file_size", ""),
+                    })
+            if not images:
+                return {"error": "No images found in message"}
+            return {"images": images, "count": len(images)}
         if action == "list_message_content":
             message_id = str(params.get("message_id", ""))
             group_id = str(params.get("group_id", ""))
@@ -1951,10 +2143,27 @@ class NapCatHandler(BaseHTTPRequestHandler):
             return {"error": f"Unknown content selector: {content}"}
 
         if action == "describe_action":
-            action_name = params.get("action", "")
+            action_name = params.get("action", "") or params.get("action_name", "")
+            if action_name == "__list__":
+                return sorted(ACTION_SCHEMAS.keys())
             schema = ACTION_SCHEMAS.get(action_name)
             if schema:
                 return schema
+            # Fallback to known _dispatch-only actions (not in ACTION_SCHEMAS)
+            _DISPATCH_ONLY_ACTIONS = {
+                "get_message_by_mid", "get_image_by_mid",
+                "reply_by_mid_text", "reply_by_mid_text_raw", "reply_by_mid_image",
+                "reply_by_mid_cqcode", "reply_by_mid_at", "reply_by_mid_json",
+                "get_events", "get_event", "get_alerts", "clear_alert",
+                "clear_all_alerts", "list_groups", "list_friends", "list_time_ranges",
+                "list_messages", "get_message", "get_stats",
+                "mark_seen", "mark_read", "mark_read_up_to", "get_unread_count",
+                "list_message_content", "get_message_content", "describe_action",
+                "send_group_message", "send_private_message",
+                "get_image", "ocr_image", "napcat_delete_msg",
+            }
+            if action_name in _DISPATCH_ONLY_ACTIONS:
+                return {"action": action_name, "description": "Action implemented in _dispatch (no ACTION_SCHEMAS entry)", "dispatch_only": True}
             return {"error": f"Unknown action: {action_name}"}
 
         # ---- napcat_delete_msg with recall rule hints ----
@@ -1965,6 +2174,24 @@ class NapCatHandler(BaseHTTPRequestHandler):
             if isinstance(r, dict) and "error" in r:
                 r["hint"] = "Recall rules: bot recalling its own message must act within 2 minutes. Admin can recall any member message. Group owner can recall any message. No time limit for admin/owner recalling others' messages."
             return r
+        # ---- Get/Download image ----
+        if action == "get_image":
+            image_url = params.get("url", "")
+            if not image_url:
+                return {"error": "Missing 'url' parameter. Usage: get_image(url='...')"}
+            from napcat_cli.lib.api import NapCatAPI
+            api = NapCatAPI()
+            result = api.call("get_image", url=image_url)
+            if isinstance(result, dict) and "error" in result:
+                # Fallback: try direct download
+                import urllib.request, os
+                try:
+                    out = f"/tmp/napcat_img_{abs(hash(image_url))}.jpg"
+                    urllib.request.urlretrieve(image_url, out)
+                    return {"path": out, "source": image_url, "note": "downloaded via fallback"}
+                except Exception as e:
+                    return {"error": f"Failed to download image: {e}", "source": image_url}
+            return result
         # ---- OCR image ----
         if action == "ocr_image":
             from napcat_cli.lib.ocr import ocr_file

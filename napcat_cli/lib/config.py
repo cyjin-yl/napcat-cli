@@ -40,12 +40,12 @@ class NapCatConfig:
     # --- generic, pluggable agent wake (Hermes is the default preset, not required) ---
     wake_enabled: bool = True
     wake_preset: str = "hermes"         # hermes | custom | none
-    wake_primary: str = "auto"          # auto | http | cli   (auto = http if configured+reachable, else cli)
+    wake_primary: str = "auto"          # auto | http | cli   (cli is LEGACY / not recommended; auto = http if configured+reachable, else legacy cli fallback)
     wake_session: str = "napcat-qq"     # session name (cli --continue / http session lookup)
     wake_http_url: str = ""             # e.g. http://127.0.0.1:8642  (hermes preset default)
     wake_http_key: str = ""             # bearer token (env: NAPCAT_WAKE_HTTP_KEY)
     wake_http_session_id: str = ""      # explicit session id; else resolved by name via GET /api/sessions
-    wake_cli_command: str = ""          # rendered template; hermes preset fills it
+    wake_cli_command: str = ""          # rendered template (LEGACY / not recommended — prefer HTTP); hermes preset fills it
     wake_debounce_seconds: float = 3.0
     wake_cooldown_seconds: float = 30.0
     wake_new_message_idle_seconds: int = 600

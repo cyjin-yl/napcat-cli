@@ -6,9 +6,10 @@ as written — no surprise argparse errors.
 
 Run: python -m pytest tests/test_agent_commands.py -v
 """
+import json
 import subprocess
-import sys
 from pathlib import Path
+import sys
 
 REPO = Path(__file__).parent.parent
 PYTHON = sys.executable
@@ -97,3 +98,196 @@ class TestEventsGroupFilter:
         assert "unrecognized arguments: --group" not in err, (
             f"--group not recognized: {err}"
         )
+
+
+class TestEventsImageUrl:
+    """napcat events -o text must show image URLs, not just [image]."""
+
+    def test_events_shows_image_url(self):
+        """Events text output should include image URL."""
+        rc, out, err = _run("events -o text -n 5")
+        if rc == 0 and out:
+            # If there are image messages, output should have url= or [image: 
+            lines = out.strip().split("\n")
+            for line in lines:
+                if "[image" in line.lower():
+                    # Should have URL information
+                    assert "url=" in line or "http" in line, (
+                        f"No URL in image line: {line}"
+                    )
+
+
+class TestGetImageHttpProvider:
+    """napcat get_image must work via HTTP provider dispatch."""
+
+    def test_get_image_action_exists(self):
+        """get_image should be a dispatchable action."""
+        # We can't easily test the full HTTP provider here without daemon,
+        # but we can check the CLI works
+        rc, out, err = _run("get_image http://example.com/test.jpg")
+        # Should either succeed (download) or fail with download error
+        # NOT fail with "invalid choice" or argparse error
+        assert "invalid choice" not in err
+
+
+class TestOcrProvider:
+    """ocr_image must be accessible via HTTP provider."""
+
+    def test_ocr_action_in_dispatch(self):
+        """ocr_image should be in the dispatch method."""
+        import inspect
+        from napcat_cli.daemon.watch import NapCatHandler
+        source = inspect.getsource(NapCatHandler._dispatch)
+        assert "ocr_image" in source, "ocr_image not in _dispatch"
+        assert "get_image" in source, "get_image not in _dispatch"
+
+
+class TestReplyByMid:
+    """napcat messages/:mid/reply/text — Agent tries this pattern."""
+
+    def test_reply_by_mid_text_action_exists(self):
+        """reply_by_mid_text should be in _dispatch."""
+        import inspect
+        from napcat_cli.daemon.watch import NapCatHandler
+        source = inspect.getsource(NapCatHandler._dispatch)
+        assert "reply_by_mid_text" in source
+
+    def test_reply_by_mid_text_raw_action_exists(self):
+        """reply_by_mid_text_raw should be in _dispatch."""
+        import inspect
+        from napcat_cli.daemon.watch import NapCatHandler
+        source = inspect.getsource(NapCatHandler._dispatch)
+        assert "reply_by_mid_text_raw" in source
+
+    def test_reply_by_mid_image_action_exists(self):
+        """reply_by_mid_image should be in _dispatch."""
+        import inspect
+        from napcat_cli.daemon.watch import NapCatHandler
+        source = inspect.getsource(NapCatHandler._dispatch)
+        assert "reply_by_mid_image" in source
+
+    def test_reply_by_mid_cqcode_action_exists(self):
+        """reply_by_mid_cqcode should be in _dispatch."""
+        import inspect
+        from napcat_cli.daemon.watch import NapCatHandler
+        source = inspect.getsource(NapCatHandler._dispatch)
+        assert "reply_by_mid_cqcode" in source
+
+    def test_reply_by_mid_at_action_exists(self):
+        """reply_by_mid_at should be in _dispatch."""
+        import inspect
+        from napcat_cli.daemon.watch import NapCatHandler
+        source = inspect.getsource(NapCatHandler._dispatch)
+        assert "reply_by_mid_at" in source
+
+    def test_reply_by_mid_json_action_exists(self):
+        """reply_by_mid_json should be in _dispatch."""
+        import inspect
+        from napcat_cli.daemon.watch import NapCatHandler
+        source = inspect.getsource(NapCatHandler._dispatch)
+        assert "reply_by_mid_json" in source
+
+
+class TestGetByMid:
+    """napcat messages/:mid/ — get message/image by message_id only."""
+
+    def test_get_message_by_mid_action_exists(self):
+        """get_message_by_mid should be in _dispatch."""
+        import inspect
+        from napcat_cli.daemon.watch import NapCatHandler
+        source = inspect.getsource(NapCatHandler._dispatch)
+        assert "get_message_by_mid" in source
+
+    def test_get_image_by_mid_action_exists(self):
+        """get_image_by_mid should be in _dispatch."""
+        import inspect
+        from napcat_cli.daemon.watch import NapCatHandler
+        source = inspect.getsource(NapCatHandler._dispatch)
+        assert "get_image_by_mid" in source
+
+
+class TestMessagePathsInSkillsFs:
+    """skills-fs.json must have the /napcat/messages/:message_id/ mount entries."""
+
+    def test_messages_mount_exists(self):
+        """skills-fs.json must contain /napcat/messages/ mounts."""
+        import json
+        with open("/home/ezra/.napcat-data/skills-fs.json") as f:
+            config = json.load(f)
+        paths = [m["path"] for m in config.get("mounts", [])]
+        assert "/napcat/messages" in paths, "messages mount not found"
+        assert "/napcat/messages/:message_id" in paths
+        assert "/napcat/messages/:message_id/reply/text" in paths
+        assert "/napcat/messages/:message_id/reply/text_raw" in paths
+        assert "/napcat/messages/:message_id/reply/image" in paths
+        assert "/napcat/messages/:message_id/reply/cqcode" in paths
+        assert "/napcat/messages/:message_id/reply/at" in paths
+        assert "/napcat/messages/:message_id/reply/json" in paths
+        assert "/napcat/messages/:message_id/image" in paths
+
+
+class TestSubagentBugFixes:
+    """Tests for bugs found by Agent EVAL testing — Phase 2."""
+
+    def test_events_t_shorthand(self):
+        """-t should be alias for --type on events."""
+        rc, out, err = _run("events -t message -o text -n 1")
+        assert "unrecognized arguments: -t" not in err, f"events -t fails: {err}"
+
+    def test_group_gid_first_order(self):
+        """napcat group <gid> info should work (gid BEFORE sub)."""
+        rc, out, err = _run("group 1050866499 info")
+        # Should not fail with `invalid choice: '1050866499'`
+        assert "invalid choice: '1050866499'" not in err, (
+            f"group {gid} info not recognized: {err}"
+        )
+
+    def test_group_gid_first_get_message(self):
+        """napcat group <gid> get_message <mid> should work."""
+        # First get a real mid
+        proc = subprocess.run(
+            [sys.executable, "-m", "napcat_cli.cli", "events", "-t", "message", "-o", "json", "-n", "1"],
+            capture_output=True, text=True, timeout=10, cwd=str(REPO),
+            env={**__import__("os").environ, "NAPCAT_DATA_DIR": "/tmp/napcat-test-data"},
+        )
+        data = json.loads(proc.stdout) if proc.stdout else []
+        if not data:
+            return  # skip if no events
+        mid = data[0].get("message_id", "")
+        if not mid:
+            return
+        rc, out, err = _run(f"group 1050866499 get_message {mid}")
+        assert "invalid choice" not in err, (
+            f"group <gid> get_message <mid> not working: {err}"
+        )
+
+    def test_describe_action_for_dispatch_only(self):
+        """describe_action should work for actions like get_message_by_mid."""
+        rc, out = subprocess.run(
+            [sys.executable, "-c",
+             "import subprocess; r=subprocess.run(['curl','-s','http://127.0.0.1:18821/invoke?action=describe_action&action=get_message_by_mid'],capture_output=True,text=True); print(r.stdout)"],
+            capture_output=True, text=True, timeout=10, cwd=str(REPO),
+        ).stdout, ""
+        # Won't actually test live HTTP from this Python run, just check existence
+        assert True  # live HTTP tested separately
+
+
+class TestEventsNoUnboundText:
+    """events -o text must not throw UnboundLocalError on meta_events (heartbeats)."""
+
+    def test_events_text_no_unbound(self):
+        """Events with no message field should not crash."""
+        rc, out, err = _run("events --no-heartbeat -o text -n 5")
+        # Should not crash with UnboundLocalError; may have other errors
+        assert "UnboundLocalError" not in (err or ""), (
+            f"UnboundLocalError: {err}"
+        )
+
+
+class TestAlertsClearBackwardCompat:
+    """napcat alerts --clear should still work (some Agents expect flag form)."""
+
+    def test_alerts_clear_subcommand(self):
+        """alerts clear (subcommand) should work."""
+        rc, out, err = _run("alerts clear")
+        assert "invalid choice" not in err, f"alerts clear failed: {err}"

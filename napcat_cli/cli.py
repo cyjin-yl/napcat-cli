@@ -259,6 +259,13 @@ def cmd_group(args: argparse.Namespace, api: NapCatAPI) -> int:
     if not require_online(api):
         return 1
 
+    # If subcommand is a number/digit, treat it as the group_id and re-route to subcommand=info.
+    # This makes `napcat group <gid> info` work the same as `napcat group info <gid>`.
+    # If subcommand is missing, give a helpful hint
+    if sub is None:
+        sys.stderr.write("Error: missing group subcommand. Try 'napcat group <subcommand> <group_id>'. Run 'napcat group --help' for the list.\n")
+        return 2
+
     if sub == "info":
         result = api.call("get_group_info", group_id=args.group_id, no_cache=args.no_cache)
     elif sub == "members":
@@ -505,15 +512,33 @@ def cmd_events(args: argparse.Namespace, api: NapCatAPI) -> int:
             msg = ev.get("message", ev.get("raw_message", ""))
             # Extract plain text from message segments
             if isinstance(msg, list):
-                text = "".join(
-                    (s.get("data") or {}).get("text", "")
-                    for s in msg if isinstance(s, dict) and s.get("type") == "text"
-                )
-                if not text:
-                    # Show segment types for non-text messages
+                text_parts = []
+                for s in msg:
+                    if isinstance(s, dict):
+                        stype = s.get("type", "?")
+                        sdata = s.get("data", {}) or {}
+                        if stype == "text":
+                            text_parts.append(sdata.get("text", ""))
+                        elif stype == "image":
+                            url = sdata.get("url", "")
+                            file_id = sdata.get("file", "") or sdata.get("file_id", "")
+                            summary = sdata.get("summary", "")
+                            img_info = "[image"
+                            if url:
+                                img_info += f": url={url}"
+                            elif file_id:
+                                img_info += f": file={file_id}"
+                            if summary:
+                                img_info += f" summary={summary[:50]}"
+                            img_info += "]"
+                            text_parts.append(img_info)
+                        else:
+                            text_parts.append(f"[{stype}]")
+                text = " ".join(text_parts)
+                if not text.strip(" []"):
                     text = "[" + ", ".join(s.get("type", "?") for s in msg if isinstance(s, dict)) + "]"
             else:
-                text = str(msg)[:100]
+                text = str(msg) if msg else f"[{ptype}]"
             sender = ev.get("sender", {})
             nickname = sender.get("nickname", "?") if isinstance(sender, dict) else "?"
             gid = ev.get("group_id", "")
@@ -1676,7 +1701,7 @@ def main() -> int:
 
     # --- events ---
     events_p = subparsers.add_parser("events", help="Read events from SQLite database")
-    events_p.add_argument("--type", default=None, help="Filter by event type")
+    events_p.add_argument("--type", "-t", default=None, help="Filter by event type")
     events_p.add_argument("--since", type=int, default=None, help="Events after timestamp")
     events_p.add_argument("--limit", "-n", type=int, default=50, help="Max events to read")
     events_p.add_argument("--output", "-o", choices=["json", "text"], default="json")
@@ -1853,7 +1878,7 @@ def main() -> int:
     wake_p.add_argument("--reason", "-r", default="manual", help="Wake reason (default: manual)")
     wake_p.add_argument("--prompt", "-p", default=None, help="Prompt text to send (default: a contextual prompt)")
     wake_p.add_argument("--transport", choices=["auto", "http", "cli"], default=None,
-                        help="Force a transport for this wake (default: from config / auto)")
+                        help="Force a transport for this wake (http recommended; cli is legacy / not recommended; default: from config / auto)")
     wake_p.add_argument("--timeout", dest="wake_timeout", type=float, default=None,
                         help="Per-wake timeout in seconds (default: 120)")
     wake_p.add_argument("--dry-run", action="store_true", help="Render what would fire without executing")
@@ -1867,6 +1892,12 @@ def main() -> int:
     setup_p.add_argument("--yes", "-y", action="store_true")
     setup_p.add_argument("--force", action="store_true")
 
+    # Pre-process argv to allow `napcat group <gid> <sub> [args]` (gid BEFORE sub)
+    # by detecting digit-first and swapping. The Agent naturally tries this order.
+    if len(sys.argv) >= 4 and sys.argv[1] == "group" and sys.argv[2].lstrip("-").isdigit() and not sys.argv[2].startswith("-"):
+        # sys.argv[2] is a numeric group_id, sys.argv[3] should be the subcommand
+        # swap them: group <gid> info -> group info <gid>
+        sys.argv[2], sys.argv[3] = sys.argv[3], sys.argv[2]
     args = parser.parse_args()
 
     if not args.command:

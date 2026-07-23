@@ -315,7 +315,7 @@ def run_setup(non_interactive: bool = False, yes: bool = False, force: bool = Fa
         cfg.wake_cli_command = ""  # hermes preset fills the default CLI command at wake time
         cfg.wake_command = ""      # clear any legacy (broken) wake command
         cfg.wake_on_event = True
-        print(f"  preset=hermes session={session} primary=auto (CLI one-shot by default)")
+        print(f"  preset=hermes session={session} primary=auto (CLI one-shot — LEGACY / NOT RECOMMENDED — prefer HTTP)")
         enable_http = False
         if not non_interactive:
             print(f"  Enable the Hermes HTTP API server now? Appends to ~/.hermes/.env and runs\n"
@@ -328,8 +328,8 @@ def run_setup(non_interactive: bool = False, yes: bool = False, force: bool = Fa
         if enable_http:
             _enable_hermes_api_server(cfg)
         else:
-            print("  HTTP API server not enabled — CLI one-shot transport will be used.\n"
-                  "  (Re-run setup or set wake_http_* later to switch to HTTP.)")
+            print("  HTTP API server not enabled — CLI one-shot transport (LEGACY / not recommended) will be used.\n"
+                  "  (Run `napcat setup` again or set wake_http_* to switch to the recommended HTTP transport.)")
     elif preset == "custom":
         cfg.wake_session = "napcat-qq" if non_interactive else _prompt_str("Session name", "napcat-qq")
         if not non_interactive:
