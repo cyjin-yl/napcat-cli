@@ -785,6 +785,11 @@ class SkillsFsManager:
             self.processor.log(f"skills-fs: reusing existing healthy mount at {self.mountpoint}")
             return True
 
+        # Kill any existing skills-fs processes before spawning a new one.
+        # If the mount is hung but the process is still alive, spawning a
+        # second daemon would stack FUSE mounts and deadlock the system.
+        self._kill_existing_processes()
+
         # Clean stale mount before starting
         if not self._stale_cleaned:
             self._clean_stale_mount()
@@ -973,6 +978,37 @@ class SkillsFsManager:
             pass
         self._pid = None
 
+    def _kill_existing_processes(self) -> None:
+        """Kill any existing skills-fs processes to prevent duplicate mounts.
+
+        Scans for processes matching our binary path and kills them. This
+        prevents stacking multiple FUSE daemons on the same mountpoint, which
+        causes deadlocks and D-state cascades.
+        """
+        try:
+            import subprocess
+            # Find all skills-fs processes
+            result = subprocess.run(
+                ["pgrep", "-f", "skills-fs fuse"],
+                capture_output=True, text=True, timeout=3,
+            )
+            if result.returncode == 0:
+                pids = result.stdout.strip().split()
+                for pid_str in pids:
+                    try:
+                        pid = int(pid_str)
+                        if pid == os.getpid():
+                            continue  # don't kill ourselves
+                        os.kill(pid, signal.SIGTERM)
+                        self.processor.log(f"skills-fs: killed existing process {pid}")
+                    except (ValueError, OSError):
+                        pass
+                # Give processes time to exit gracefully
+                import time as _time
+                _time.sleep(0.5)
+        except Exception as e:
+            self.processor.log(f"skills-fs: error killing existing processes: {e}")
+
     def _clean_stale_mount(self) -> None:
         """Lazy-unmount any stale FUSE mount at our mountpoint."""
         try:
@@ -1004,9 +1040,14 @@ class SkillsFsManager:
                 pass
 
     def _write_degraded(self, reason: str) -> None:
-        """Write a degraded status file so skills-fs consumers know the mount is unavailable."""
-        degraded_file = Path(self.mountpoint) / "SKILLS_FS_DEGRADED"
-        try:
+        """Write a degraded status file so skills-fs consumers know the mount is unavailable.
+
+        Timeout-guarded: if the mountpoint is on a hung FUSE, the write would
+        block in D-state. We run it in a daemon thread and abandon it if it
+        doesn't finish within 2 seconds.
+        """
+        def _write():
+            degraded_file = Path(self.mountpoint) / "SKILLS_FS_DEGRADED"
             info = {
                 "status": "degraded",
                 "reason": reason,
@@ -1015,18 +1056,27 @@ class SkillsFsManager:
             }
             Path(self.mountpoint).mkdir(parents=True, exist_ok=True)
             degraded_file.write_text(json.dumps(info, indent=2, ensure_ascii=False))
-        except Exception:
-            pass
+
+        res = _run_with_timeout(_write, 2.0)
+        if res is _TIMEOUT:
+            self.processor.log("skills-fs: could not write degraded marker (mountpoint hung)")
 
 
 async def skillsfs_monitor_task(manager: SkillsFsManager, interval: int = 10) -> None:
-    """Background task that periodically checks skills-fs health and restarts on failure."""
+    """Background task that periodically checks skills-fs health and restarts on failure.
+
+    check() and restart() are blocking (subprocess calls, os.kill, mount
+    verification). Running them in a thread executor prevents blocking the
+    asyncio event loop, which would freeze the HTTP provider and WS listener.
+    """
+    loop = asyncio.get_event_loop()
     while True:
         await asyncio.sleep(interval)
         if manager.status == "stopped":
             continue
-        if not manager.check():
-            manager.restart()
+        healthy = await loop.run_in_executor(None, manager.check)
+        if not healthy:
+            await loop.run_in_executor(None, manager.restart)
 # ---------------------------------------------------------------------------
 # HTTP Provider (skills-fs compatible endpoint)
 # ---------------------------------------------------------------------------
