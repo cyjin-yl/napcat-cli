@@ -2354,6 +2354,18 @@ class NapCatHandler(BaseHTTPRequestHandler):
             from napcat_cli.lib.api import NapCatAPI
             api = NapCatAPI()
             return api.call("set_group_name", **params)
+        if action == "set_group_admin":
+            from napcat_cli.lib.api import NapCatAPI
+            api = NapCatAPI()
+            return api.call("set_group_admin", **params)
+        if action == "set_group_ban":
+            from napcat_cli.lib.api import NapCatAPI
+            api = NapCatAPI()
+            return api.call("set_group_ban", **params)
+        if action == "set_group_kick":
+            from napcat_cli.lib.api import NapCatAPI
+            api = NapCatAPI()
+            return api.call("set_group_kick", **params)
         # ---- napcat-based proxy for standard OneBot actions ----
         if action == "get_status":
             from napcat_cli.lib.api import NapCatAPI
