@@ -20,6 +20,14 @@ dev = ["pytest>=7", "pyflakes>=3.0"]
 [tool.hatch.build.targets.wheel]
 packages = ["napcat_cli"]
 
+# Include non-.py skill/skills-fs assets so `napcat setup` works from a wheel.
+[tool.hatch.build]
+include = [
+  "napcat_cli/**",
+]
+
+[tool.hatch.build.targets.wheel.force-include]
+"napcat_cli/data" = "napcat_cli/data"
 [tool.hatch.build.targets.sdist]
 # Keep virtualenvs, the Go submodule, and local cruft out of the source
 # distribution (venv absolute symlinks make the sdist tar unbuildable).

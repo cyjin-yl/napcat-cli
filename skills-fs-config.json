@@ -1,12 +1,6 @@
 {
-  "providers": [
-    {
-      "id": "napcat",
-      "url": "http://127.0.0.1:18821/invoke"
-    }
-  ],
-  "skillsRoot": "$HOME/.napcat-cli/skills",
+  "skillsRoot": "$HOME/.hermes/skills",
   "includes": [
-    "skills-fs-fragment.json"
+    "napcat_cli/data/skills-fs.json"
   ]
 }

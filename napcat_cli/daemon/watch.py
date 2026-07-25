@@ -100,7 +100,8 @@ class EventProcessor:
                  debounce_seconds: float = 3.0, cooldown_seconds: float = 30.0,
                  new_message_idle_seconds: int = 600, wake_timeout: float = 300.0):
         self.writer = EventsWriter(data_dir)
-        self.self_id = self_id
+        # Normalize; empty string disables AT_ME / poke / ban detection.
+        self.self_id = str(self_id).strip() if self_id else ""
         self.wake_command = wake_command
         self.wake_on_event = wake_on_event
         self.group_trigger_word = group_trigger_word
@@ -118,7 +119,8 @@ class EventProcessor:
                 debounce_seconds=debounce_seconds, cooldown_seconds=cooldown_seconds,
                 new_message_idle_seconds=new_message_idle_seconds,
                 wake_timeout=wake_timeout,
-                legacy_command=wake_command)
+                legacy_command=wake_command,
+                self_id=self.self_id)
         else:
             self.orchestrator = None
 
@@ -130,6 +132,18 @@ class EventProcessor:
 
     def process(self, event: dict) -> None:
         try:
+            # Learn bot QQ from the event stream when config self_id is missing.
+            # Wrong placeholders (e.g. "12345") also get corrected once we see a
+            # real OneBot self_id on an inbound event.
+            event_self = event.get("self_id")
+            if event_self is not None and str(event_self).strip():
+                event_self_s = str(event_self).strip()
+                if not self.self_id or self.self_id in ("0", "12345"):
+                    if self.self_id != event_self_s:
+                        self.log(f"self_id auto-set from event: {event_self_s!r} (was {self.self_id!r})")
+                        self.self_id = event_self_s
+                        if self.orchestrator is not None:
+                            self.orchestrator.self_id = event_self_s
             row_id = self.writer.write_event(event)
             self.log(f"Event: row_id={row_id}")
             post_type = event.get("post_type", "")
@@ -144,6 +158,7 @@ class EventProcessor:
         except Exception as e:
             import traceback
             self.log(f"process() ERROR: {e}\n{traceback.format_exc()}")
+
 
     def _handle_message(self, event: dict) -> None:
         msg_type = event.get("message_type", "")
@@ -1312,6 +1327,10 @@ class NapCatHandler(BaseHTTPRequestHandler):
             group_id = str(params.get("group_id", ""))
             user_id = str(params.get("user_id", ""))
             if group_id:
+                # Validate group exists in events DB
+                row = db.execute("SELECT 1 FROM events WHERE group_id = ? LIMIT 1", (group_id,)).fetchone()
+                if row is None:
+                    return {"error": f"Group {group_id} not found in events database"}
                 entries.extend([
                     {"name": "kick", "kind": "api"},
                     {"name": "ban", "kind": "api"},
@@ -1336,6 +1355,10 @@ class NapCatHandler(BaseHTTPRequestHandler):
                     {"name": "announce.schema", "kind": "blob"},
                 ])
             elif user_id:
+                # Validate friend exists in events DB
+                row = db.execute("SELECT 1 FROM events WHERE user_id = ? AND message_type = 'private' LIMIT 1", (user_id,)).fetchone()
+                if row is None:
+                    return {"error": f"Friend {user_id} not found in events database"}
                 entries.extend([
                     {"name": "info", "kind": "api"},
                     {"name": "remark", "kind": "api"},
@@ -2335,6 +2358,9 @@ def run_daemon(config_path: str) -> None:
         new_message_idle_seconds=nm_idle,
         wake_timeout=wake_timeout,
     )
+    if not processor.self_id:
+        processor.log("WARNING: self_id empty — AT_ME / poke / ban wakes disabled until an event carries self_id")
+
     from napcat_cli.lib.events import EventsReader
     events_reader = EventsReader(DATA_DIR)
     if processor.orchestrator is not None:

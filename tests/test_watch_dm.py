@@ -54,3 +54,51 @@ def test_group_message_does_not_wake_dm_me(tmp_path):
     proc = EventProcessor(tmp_path, self_id="100", orchestrator=orch)
     proc._handle_message(_event(message_type="group", group_id="456"))
     assert "DM_ME" not in _reasons(orch)
+
+def test_group_at_mention_wakes_at_me(tmp_path):
+    orch = MagicMock()
+    proc = EventProcessor(tmp_path, self_id="10001", orchestrator=orch)
+    proc._handle_message(_event(
+        text="hello", at=True, self_id="10001",
+        message_type="group", group_id="20002",
+    ))
+    assert "AT_ME" in _reasons(orch)
+
+
+def test_wrong_self_id_misses_at_me(tmp_path):
+    """Placeholder self_id must not match real @qq — documents the bug."""
+    orch = MagicMock()
+    proc = EventProcessor(tmp_path, self_id="12345", orchestrator=orch)
+    proc._handle_message(_event(
+        text="hello", at=True, self_id="10001",
+        message_type="group", group_id="20002",
+    ))
+    assert "AT_ME" not in _reasons(orch)
+
+
+def test_process_heals_placeholder_self_id_then_at_me(tmp_path):
+    """process() should learn real self_id from the event and detect @."""
+    orch = MagicMock()
+    proc = EventProcessor(tmp_path, self_id="12345", orchestrator=orch)
+    ev = _event(
+        text="hi bot", at=True, self_id="10001",
+        message_type="group", group_id="20002",
+    )
+    ev["self_id"] = 10001
+    # segments form for at (also covered by raw CQ in _event)
+    ev["message"] = [
+        {"type": "at", "data": {"qq": "10001"}},
+        {"type": "text", "data": {"text": " hi bot"}},
+    ]
+    proc.process(ev)
+    assert proc.self_id == "10001"
+    assert "AT_ME" in _reasons(orch)
+
+
+def test_process_heals_empty_self_id(tmp_path):
+    orch = MagicMock()
+    proc = EventProcessor(tmp_path, self_id="", orchestrator=orch)
+    ev = _event(message_type="group", group_id="1")
+    ev["self_id"] = 10001
+    proc.process(ev)
+    assert proc.self_id == "10001"

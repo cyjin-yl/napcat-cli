@@ -327,23 +327,34 @@ def main():
         print(json.dumps(mounts, indent=2, ensure_ascii=False))
         return
 
-    # Write to canonical location
-    canonical = os.path.expanduser("~/.hermes/skills-fs.d/napcat-cli.json")
-    skill_copy = os.path.expanduser("~/.hermes/skills/napcat-cli/skills-fs.json")
+    # Canonical in-repo source (runtime paths should symlink here).
+    repo_root = Path(__file__).resolve().parent.parent
+    canonical = repo_root / "napcat_cli" / "data" / "skills-fs.json"
 
-    # Load existing file to preserve skills section
-    with open(canonical) as f:
-        cfg = json.load(f)
+    if canonical.exists():
+        cfg = json.loads(canonical.read_text(encoding="utf-8"))
+    else:
+        cfg = {
+            "providers": [{"id": "napcat", "url": "http://127.0.0.1:18821/invoke"}],
+            "skills": [],
+            "mounts": [],
+        }
 
+    # Always ensure the HTTP provider is registered (missing providers → EINVAL mounts).
+    providers = cfg.get("providers") or []
+    if not any(p.get("id") == "napcat" for p in providers if isinstance(p, dict)):
+        providers.append({"id": "napcat", "url": "http://127.0.0.1:18821/invoke"})
+    cfg["providers"] = providers
     cfg["mounts"] = mounts
 
-    for dest in (canonical, skill_copy):
-        os.makedirs(os.path.dirname(dest), exist_ok=True)
-        with open(dest, "w") as f:
-            json.dump(cfg, f, indent=2, ensure_ascii=False)
-            f.write("\n")
-        print(f"Written: {dest}")
+    # Opt out AGENTS.md for deep dynamic dirs without docs stubs.
+    for m in cfg["mounts"]:
+        if m.get("kind") in ("dir", "dynamic_dir") and m.get("path", "").count(":") >= 2:
+            # deep param paths like .../:message_id
+            if m["path"].rstrip("/").endswith(":message_id") or m["path"] == "/napcat/messages":
+                m.setdefault("agents", False)
 
-
-if __name__ == "__main__":
-    main()
+    canonical.parent.mkdir(parents=True, exist_ok=True)
+    canonical.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    print(f"Written: {canonical}")
+    print("Tip: point ~/.napcat-data/skills-fs.json at this file via symlink.")

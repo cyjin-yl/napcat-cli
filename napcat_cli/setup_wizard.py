@@ -118,9 +118,99 @@ def _check_skills_fs_binary(cfg: NapCatConfig) -> tuple[str, str]:
     return "", "missing"
 
 
+def _bundled_skills_fs_config_text() -> str | None:
+    """Return the packaged skills-fs.json text, or None if unavailable."""
+    try:
+        import importlib.resources as pkg_resources
+        return pkg_resources.files("napcat_cli.data").joinpath("skills-fs.json").read_text(encoding="utf-8")
+    except Exception:
+        # Source-tree fallback (dev checkout without installed package data)
+        candidate = Path(__file__).resolve().parent / "data" / "skills-fs.json"
+        if candidate.is_file():
+            return candidate.read_text(encoding="utf-8")
+    return None
+
+
+def _skills_fs_config_usable(path: Path) -> bool:
+    """True if path points at a JSON config that registers at least one provider."""
+    try:
+        if not path.exists():
+            return False
+        data = json.loads(path.read_text(encoding="utf-8"))
+        providers = data.get("providers") or []
+        mounts = data.get("mounts") or []
+        return bool(providers) and bool(mounts)
+    except Exception:
+        return False
+
+
+def _ensure_skills_fs_config(dest: str | Path, *, force: bool = False) -> str:
+    """Install packaged skills-fs.json to *dest* if missing/broken.
+
+    Never clobbers a working config (including a symlink to a valid file).
+    ``force`` is accepted for API symmetry with setup --force but does **not**
+    overwrite a usable config — only missing/incomplete configs are replaced.
+    Returns the path written or kept.
+    """
+    del force  # keep signature; never overwrite healthy local configs
+    dest = Path(dest).expanduser()
+    dest.parent.mkdir(parents=True, exist_ok=True)
+
+    if _skills_fs_config_usable(dest):
+        print(f"  skills-fs config OK: {dest}" + (" (symlink)" if dest.is_symlink() else ""))
+        return str(dest)
+
+    text = _bundled_skills_fs_config_text()
+    if text is None:
+        print("  WARNING: bundled skills-fs.json not found; skills-fs mounts will not work",
+              file=sys.stderr)
+        return str(dest)
+
+    # Broken symlink / incomplete config → replace.
+    if dest.is_symlink() or dest.exists():
+        try:
+            dest.unlink()
+        except OSError as e:
+            print(f"  WARNING: cannot replace {dest}: {e}", file=sys.stderr)
+            return str(dest)
+
+    dest.write_text(text, encoding="utf-8")
+    print(f"  Installed skills-fs config → {dest}")
+    return str(dest)
+
+
+
+
+def _is_fuse_mount(path: str) -> bool:
+    """Check if path is a FUSE mountpoint by reading /proc/mounts (never hangs)."""
+    try:
+        with open("/proc/mounts") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 3 and parts[1] == path and "fuse" in parts[2]:
+                    return True
+    except OSError:
+        pass
+    return False
+
+
 def _install_hermes_skill(cfg: NapCatConfig, force: bool = False) -> None:
-    """Copy SKILL.md, persona.md, and references/ into ~/.hermes/skills/napcat-cli/."""
-    hermes_dir = Path.home() / ".hermes" / "skills" / "napcat-cli"
+    """Copy SKILL.md, persona.md, and references/ into the Hermes skill dir.
+
+    Safe on a live skills-fs FUSE overlay: detects the mount via /proc/mounts
+    and skips (the overlay already serves generated files). Never touches the
+    mount directory directly, avoiding D-state hangs from stuck FUSE processes.
+    """
+    hermes_dir = Path(os.environ.get(
+        "NAPCAT_HERMES_SKILL_DIR",
+        str(Path.home() / ".hermes" / "skills" / "napcat-cli"),
+    ))
+
+    # If the skill dir is a FUSE mount, the overlay already serves SKILL.md —
+    # do NOT touch it (file ops on a stuck FUSE mount cause D-state hangs).
+    if _is_fuse_mount(str(hermes_dir)):
+        print(f"  Hermes skill dir is a FUSE mount ({hermes_dir}) — overlay serves files, skipping install.")
+        return
 
     if hermes_dir.exists() and not force:
         print(f"  Hermes skill already installed at {hermes_dir}. Use --force to overwrite.")
@@ -142,14 +232,20 @@ def _install_hermes_skill(cfg: NapCatConfig, force: bool = False) -> None:
         print("  Could not read bundled skill files, skipping Hermes skill install.", file=sys.stderr)
         return
 
-    hermes_dir.mkdir(parents=True, exist_ok=True)
-    (hermes_dir / "SKILL.md").write_text(skill_md)
-    (hermes_dir / "persona.md").write_text(persona_md)
-    if ref_files:
-        ref_dir = hermes_dir / "references"
-        ref_dir.mkdir(exist_ok=True)
-        for name, content in ref_files.items():
-            (ref_dir / name).write_text(content)
+    try:
+        hermes_dir.mkdir(parents=True, exist_ok=True)
+        (hermes_dir / "SKILL.md").write_text(skill_md)
+        (hermes_dir / "persona.md").write_text(persona_md)
+        if ref_files:
+            ref_dir = hermes_dir / "references"
+            ref_dir.mkdir(exist_ok=True)
+            for name, content in ref_files.items():
+                (ref_dir / name).write_text(content)
+    except OSError as e:
+        print(f"  Skipping Hermes skill file write ({e}). "
+              f"If skills-fs is mounted this is OK — the overlay serves SKILL.md.",
+              file=sys.stderr)
+        return
     print(f"  Hermes skill installed at {hermes_dir}")
 
 
@@ -284,10 +380,16 @@ def run_setup(non_interactive: bool = False, yes: bool = False, force: bool = Fa
     binary_path, how = _check_skills_fs_binary(cfg)
     if how == "missing":
         print("  Go binary not found. Build it: cd skills-fs && make build (needs Go).", file=sys.stderr)
+        print("  skills-fs FUSE is optional — CLI + daemon work without it.", file=sys.stderr)
+        # Avoid endless degraded restart loops for fresh installs without the binary.
+        cfg.skills_fs_enabled = False
     else:
         print(f"  skills-fs binary found: {binary_path} ({how})")
     if binary_path:
         cfg.skills_fs_binary = binary_path
+
+    # Ship a complete skills-fs.json (with providers) so first `daemon start` works.
+    cfg.skills_fs_config = _ensure_skills_fs_config(cfg.skills_fs_config, force=force)
     print()
 
     # --- 4. Wake agent preset ---

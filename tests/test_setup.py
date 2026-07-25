@@ -57,3 +57,41 @@ class TestSetupNonInteractive:
             "wake_new_message_idle_seconds",
         }
         assert set(daemon_data.keys()) == expected
+
+
+class TestSkillsFsConfigInstall:
+    def test_setup_installs_skills_fs_json(self, tmp_path):
+        """Fresh install must ship a skills-fs.json with providers+mounts."""
+        os.environ["NAPCAT_DATA_DIR"] = str(tmp_path)
+        os.environ["NAPCAT_SKILLSFS_CONFIG"] = str(tmp_path / "skills-fs.json")
+        os.environ["NAPCAT_HERMES_SKILL_DIR"] = str(tmp_path / "hermes-skill")
+
+        with patch("napcat_cli.lib.api.NapCatAPI.call", return_value={"retcode": 0}):
+            rc = run_setup(non_interactive=True, yes=True)
+
+        assert rc == 0
+        cfg_path = tmp_path / "skills-fs.json"
+        assert cfg_path.is_file()
+        data = json.loads(cfg_path.read_text())
+        assert data.get("providers"), "providers required for FUSE mounts"
+        assert any(p.get("id") == "napcat" for p in data["providers"])
+        assert data.get("mounts"), "mounts required"
+
+    def test_setup_keeps_existing_symlink(self, tmp_path):
+        """A working symlink must not be replaced by setup."""
+        os.environ["NAPCAT_DATA_DIR"] = str(tmp_path)
+        os.environ["NAPCAT_HERMES_SKILL_DIR"] = str(tmp_path / "hermes-skill")
+        real = tmp_path / "real-skills-fs.json"
+        link = tmp_path / "skills-fs.json"
+        real.write_text(json.dumps({
+            "providers": [{"id": "napcat", "url": "http://127.0.0.1:18821/invoke"}],
+            "mounts": [{"path": "/napcat", "kind": "dir", "mode": "0755", "agents": False}],
+        }))
+        link.symlink_to(real)
+        os.environ["NAPCAT_SKILLSFS_CONFIG"] = str(link)
+
+        with patch("napcat_cli.lib.api.NapCatAPI.call", return_value={"retcode": 0}):
+            run_setup(non_interactive=True, yes=True, force=True)
+
+        assert link.is_symlink()
+        assert link.resolve() == real.resolve()

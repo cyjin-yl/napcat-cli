@@ -70,7 +70,7 @@ class TestGroupGetMessage:
 
     def test_group_get_message_exists(self):
         """get_message should work as a group subcommand."""
-        rc, out, err = _run("group 783289820 get_message 12345")
+        rc, out, err = _run("group 20003 get_message 12345")
         # Should not fail with "invalid choice"
         assert "invalid choice" not in err or "get_message" in err, (
             f"group get_message not recognized: {err}"
@@ -211,11 +211,23 @@ class TestMessagePathsInSkillsFs:
     """skills-fs.json must have the /napcat/messages/:message_id/ mount entries."""
 
     def test_messages_mount_exists(self):
-        """skills-fs.json must contain /napcat/messages/ mounts."""
+        """Bundled skills-fs.json must contain /napcat/messages/ mounts."""
         import json
-        with open("/home/ezra/.napcat-data/skills-fs.json") as f:
-            config = json.load(f)
+        from pathlib import Path
+        # Prefer packaged data; fall back to source tree (dev checkout).
+        candidates = [
+            Path(__file__).resolve().parents[1] / "napcat_cli" / "data" / "skills-fs.json",
+        ]
+        try:
+            import importlib.resources as pkg_resources
+            candidates.insert(0, Path(str(pkg_resources.files("napcat_cli.data").joinpath("skills-fs.json"))))
+        except Exception:
+            pass
+        config_path = next((p for p in candidates if p.is_file()), None)
+        assert config_path is not None, "bundled skills-fs.json not found"
+        config = json.loads(config_path.read_text(encoding="utf-8"))
         paths = [m["path"] for m in config.get("mounts", [])]
+        assert config.get("providers"), "skills-fs.json must register providers (e.g. napcat)"
         assert "/napcat/messages" in paths, "messages mount not found"
         assert "/napcat/messages/:message_id" in paths
         assert "/napcat/messages/:message_id/reply/text" in paths
@@ -237,9 +249,9 @@ class TestSubagentBugFixes:
 
     def test_group_gid_first_order(self):
         """napcat group <gid> info should work (gid BEFORE sub)."""
-        rc, out, err = _run("group 1050866499 info")
-        # Should not fail with `invalid choice: '1050866499'`
-        assert "invalid choice: '1050866499'" not in err, (
+        rc, out, err = _run("group 20002 info")
+        # Should not fail with `invalid choice: '20002'`
+        assert "invalid choice: '20002'" not in err, (
             f"group {gid} info not recognized: {err}"
         )
 
@@ -257,7 +269,7 @@ class TestSubagentBugFixes:
         mid = data[0].get("message_id", "")
         if not mid:
             return
-        rc, out, err = _run(f"group 1050866499 get_message {mid}")
+        rc, out, err = _run(f"group 20002 get_message {mid}")
         assert "invalid choice" not in err, (
             f"group <gid> get_message <mid> not working: {err}"
         )
@@ -299,13 +311,14 @@ class TestFoundBugFixes2:
 
     def test_wake_subcommand_registered(self):
         """Bug 1: napcat wake must be in commands dispatch."""
-        rc, out, err = _run("wake --reason test")
+        # --dry-run only: do not invoke a real Hermes/HTTP wake (can hang).
+        rc, out, err = _run("wake --reason test --dry-run")
         assert "Available commands" not in out, "wake subcommand not in dispatch"
         assert "unknown command" not in (err or "").lower()
 
     def test_friend_info_handler_exists(self):
         """Bug 3: cmd_friend must handle 'info' subcommand."""
-        rc, out, err = _run("friend info 3914024488")
+        rc, out, err = _run("friend info 10001")
         assert "Unknown friend command" not in err, (
             f"friend info not handled: {err}"
         )

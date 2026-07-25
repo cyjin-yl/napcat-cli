@@ -415,9 +415,29 @@ def cmd_daemon(args: argparse.Namespace, api: NapCatAPI) -> int:
                 pid_file.unlink()  # Stale PID file, clean up
         # Write config for daemon
         cfg = get_config()
+        # Resolve real bot QQ for AT_ME / poke / ban detection. Empty or
+        # placeholder self_id silently disables @ wake — heal from login API.
+        self_id = str(cfg.self_id or "").strip()
+        if not self_id or self_id in ("0", "12345"):
+            try:
+                login = api.call("get_login_info")
+                if login.get("retcode") == 0:
+                    real_id = str((login.get("data") or {}).get("user_id") or "").strip()
+                    if real_id:
+                        self_id = real_id
+                        cfg.self_id = real_id
+                        try:
+                            cfg.save()
+                        except FileNotFoundError as e:
+                            print(f"Warning: could not persist self_id: {e}", file=sys.stderr)
+            except Exception as e:
+                print(f"Warning: could not resolve self_id via get_login_info: {e}", file=sys.stderr)
+        if not self_id:
+            print("Warning: self_id is empty — @mentions (AT_ME) will not wake. "
+                  "Run 'napcat status' or 'napcat config set self_id <qq>'.", file=sys.stderr)
         cfg_path = DATA_DIR / "daemon.json"
         cfg_dict = {
-            "self_id": cfg.self_id or "",
+            "self_id": self_id,
             "wake_command": cfg.wake_command,
             "wake_on_event": cfg.wake_on_event,
             "ws_port": cfg.ws_port,
@@ -440,6 +460,7 @@ def cmd_daemon(args: argparse.Namespace, api: NapCatAPI) -> int:
             "wake_new_message_idle_seconds": cfg.wake_new_message_idle_seconds,
         }
         cfg_path.write_text(json.dumps(cfg_dict, indent=2))
+
 
         # Launch daemon as background process. Put the source tree on PYTHONPATH
         # so `-m napcat_cli.daemon.watch` resolves regardless of the caller's cwd
@@ -717,14 +738,19 @@ def cmd_status(args: argparse.Namespace, api: NapCatAPI) -> int:
     print(f"Logged in as: {nickname} ({user_id})", file=sys.stderr)
     print(f"Status: {status_text} ({health_text})", file=sys.stderr)
 
-    # Update config with self_id
+    # Update config with self_id (always correct wrong/empty placeholders)
     cfg = get_config()
-    if cfg.self_id is None:
-        cfg.self_id = str(login["data"].get("user_id", ""))
+    real_self = str(login["data"].get("user_id", "") or "").strip()
+    cur = str(cfg.self_id or "").strip()
+    if real_self and cur != real_self:
+        cfg.self_id = real_self
         try:
             cfg.save()
+            if cur and cur != real_self:
+                print(f"Updated self_id: {cur!r} -> {real_self!r}", file=sys.stderr)
         except FileNotFoundError as e:
             print(f"Warning: could not persist self_id: {e}", file=sys.stderr)
+
     # Print full JSON
     print(json.dumps({"login": login["data"], "status": data}, indent=2, ensure_ascii=False))
 
@@ -1409,7 +1435,7 @@ def cmd_wake(args: argparse.Namespace, api: NapCatAPI) -> int:
     prompt = getattr(args, "prompt", None) or _default_wake_prompt(reason)
     transport = getattr(args, "transport", None)
     dry_run = getattr(args, "dry_run", False)
-    timeout = getattr(args, "wake_timeout", None) or 120.0
+    timeout = getattr(args, "wake_timeout", None) or 15.0
 
     waker = _build_waker_for_cli(cfg, transport)
 
@@ -1640,8 +1666,7 @@ def main() -> int:
     gr = group_sub.add_parser(
         "rename",
         help="Set group card name",
-        usage="napcat group rename <group_id> <user_id> <card>",
-        epilog="Example: napcat group rename 1050866499 3914024488 '测试名片'",
+        epilog="Example: napcat group rename 123456789 10001 '测试名片'",
     )
     gr.add_argument("group_id")
     gr.add_argument("user_id")

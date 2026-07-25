@@ -56,20 +56,25 @@ napcat setup          # interactive — guides token, data dir, skills-fs, wake
 napcat daemon start
 ```
 
-The setup wizard writes two config files:
+**What you need before setup works end-to-end:**
+
+1. A running [NapCat](https://github.com/NapNeko/NapCatQQ) instance with HTTP API (default `http://127.0.0.1:18801`) and WebSocket (default `18800`).
+2. Optional: `skills-fs` binary on `PATH` (or built from the `skills-fs/` submodule) for the FUSE tree. Without it, CLI + wake still work; setup disables FUSE automatically.
+3. Optional: Hermes (or any HTTP/CLI agent) for auto-reply wakes.
+
+The setup wizard writes:
 
 - `<data_dir>/config.json` — API URL, token, self_id, ports, triggers
-- `<data_dir>/daemon.json` — All fields consumed by `watch.py` including `skills_fs_*` settings
+- `<data_dir>/daemon.json` — fields consumed by `watch.py` including `skills_fs_*`
+- `<data_dir>/skills-fs.json` — full FUSE mount map **with the `napcat` HTTP provider** (installed from the package if missing; existing/symlink configs are never overwritten)
 
 Non-interactive mode uses defaults:
 
 ```bash
 napcat setup --non-interactive  # no prompts, validates token
 napcat setup --yes              # skip token validation
-napcat setup --force            # overwrite existing config
+napcat setup --force            # overwrite existing config.json (skills-fs.json only if broken)
 ```
-
----
 
 ## Agent Wake
 
