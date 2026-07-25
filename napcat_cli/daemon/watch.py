@@ -2247,14 +2247,46 @@ class NapCatHandler(BaseHTTPRequestHandler):
                 return schema
             # Fallback to known _dispatch-only actions (not in ACTION_SCHEMAS)
             _DISPATCH_ONLY_ACTIONS = {
+                # by-message-id actions (no group_id needed)
                 "get_message_by_mid", "get_image_by_mid",
                 "reply_by_mid_text", "reply_by_mid_text_raw", "reply_by_mid_image",
                 "reply_by_mid_cqcode", "reply_by_mid_at", "reply_by_mid_json",
+                # event/alert browsing
                 "get_events", "get_event", "get_alerts", "clear_alert",
-                "clear_all_alerts", "list_groups", "list_friends", "list_time_ranges",
-                "list_message_content", "get_message_content", "describe_action",
-                "send_group_message", "send_private_message",
-                "get_image", "ocr_image", "napcat_delete_msg",
+                "clear_all_alerts",
+                # group/friend listing & message browsing
+                "list_groups", "list_friends", "list_time_ranges",
+                "list_messages", "get_message", "get_stats",
+                # seen/read tracking
+                "mark_seen", "mark_read", "mark_read_up_to", "get_unread_count",
+                # message content
+                "list_message_content", "get_message_content",
+                # introspection
+                "describe_action",
+                # group message sends
+                "send_group_message", "send_group_text", "send_group_text_raw",
+                "send_group_image", "send_group_file", "send_group_cqcode",
+                "send_group_at", "send_group_json",
+                # private message sends
+                "send_private_message", "send_private_text", "send_private_text_raw",
+                "send_private_image", "send_private_file", "send_private_cqcode",
+                "send_private_at", "send_private_json",
+                # reply-in-context (group-scoped)
+                "reply_group_text", "reply_group_text_raw", "reply_group_image",
+                "reply_group_file", "reply_group_cqcode", "reply_group_at",
+                "reply_group_json",
+                # reply-in-context (private-scoped)
+                "reply_private_text", "reply_private_text_raw", "reply_private_image",
+                "reply_private_file", "reply_private_cqcode", "reply_private_at",
+                "reply_private_json",
+                # media / OCR
+                "get_image", "ocr_image",
+                # NapCat proxy helpers
+                "napcat_delete_msg",
+                # group admin (OneBot API wrappers)
+                "group_leave", "send_group_notice", "send_poke",
+                "set_friend_remark", "set_group_card", "set_group_name",
+                # standard OneBot actions
                 "get_status",
             }
             if action_name in _DISPATCH_ONLY_ACTIONS:

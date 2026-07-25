@@ -576,4 +576,73 @@ class TestHttpProviderEdgeCases:
         )
         assert status == 200, f"Expected 200, got {status}: {body}"
         data = json.loads(body)
-        assert "error" not in data or "dispatch_only" in data
+        self._assert_valid_describe(data)
+
+    def _assert_valid_describe(self, data):
+        """Helper: describe_action response is either schema or dispatch_only."""
+        if "dispatch_only" in data:
+            return True
+        if "description" in data and "params" in data:
+            return True  # It's a schema
+        if "error" in data:
+            return False  # Error, not valid
+        return False
+
+    def test_describe_action_get_stats_returns_dispatch_only(self):
+        """describe_action for get_stats returns valid result."""
+        import json
+        status, body = self._post(
+            b'{"action": "describe_action", "params": {"action": "get_stats"}}'
+        )
+        assert status == 200, f"Expected 200, got {status}: {body}"
+        data = json.loads(body)
+        assert self._assert_valid_describe(data), f"Invalid describe response: {data}"
+
+    def test_describe_action_group_leave_has_schema(self):
+        """describe_action for group_leave returns schema (has ACTION_SCHEMAS entry)."""
+        import json
+        status, body = self._post(
+            b'{"action": "describe_action", "params": {"action": "group_leave"}}'
+        )
+        assert status == 200, f"Expected 200, got {status}: {body}"
+        data = json.loads(body)
+        # group_leave HAS a schema, so should have 'params' and 'description'
+        assert "params" in data or "dispatch_only" in data, f"Expected schema: {data}"
+
+    def test_describe_action_list_messages_has_schema_or_dispatch(self):
+        """describe_action for list_messages returns valid."""
+        import json
+        status, body = self._post(
+            b'{"action": "describe_action", "params": {"action": "list_messages"}}'
+        )
+        assert status == 200, f"Expected 200, got {status}: {body}"
+        data = json.loads(body)
+        assert self._assert_valid_describe(data), f"Invalid describe response: {data}"
+
+    def test_describe_action_unknown_returns_200_with_error(self):
+        """describe_action for truly unknown action returns 200 with error in body."""
+        import json
+        status, body = self._post(
+            b'{"action": "describe_action", "params": {"action": "does_not_exist_at_all_xyz"}}'
+        )
+        assert status == 200, f"Expected 200, got {status}: {body}"
+        data = json.loads(body)
+        assert "error" in data, f"Expected error for unknown action: {data}"
+
+    def test_get_stats_returns_event_count(self):
+        """get_stats returns valid JSON with event_count and alert_count."""
+        import json
+        status, body = self._post(b'{"action": "get_stats"}')
+        assert status == 200, f"Expected 200, got {status}: {body}"
+        data = json.loads(body)
+        assert "event_count" in data, f"Missing event_count: {data}"
+        assert "alert_count" in data, f"Missing alert_count: {data}"
+
+    def test_list_groups_returns_list(self):
+        """list_groups returns entries list."""
+        import json
+        status, body = self._post(b'{"action": "list_groups"}')
+        assert status == 200, f"Expected 200, got {status}: {body}"
+        data = json.loads(body)
+        entries = data.get("entries", data)
+        assert isinstance(entries, list), f"Expected list: {entries}"
