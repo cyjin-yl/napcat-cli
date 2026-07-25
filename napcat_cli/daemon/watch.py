@@ -1185,8 +1185,8 @@ class NapCatHandler(BaseHTTPRequestHandler):
                     action_name_for_describe = v[1]
                     break
             action = routing_action
-            if not action:
-                self._send_error(400, "Missing action parameter")
+            if not isinstance(action, str) or not action:
+                self._send_error(400, "Missing or invalid 'action' (must be a non-empty string)")
                 return
             if action not in _readable:
                 self._send_error(403, f"Action '{action}' not allowed via GET (use POST for write actions)")
@@ -1202,28 +1202,51 @@ class NapCatHandler(BaseHTTPRequestHandler):
             return
 
         self._send_error(404, f"Not found: {path}")
+    # Maximum POST body size: 1 MB. Larger payloads are rejected with 413
+    # to prevent slow-read/DoS hangs where the server blocks waiting for bytes
+    # that never arrive (a slowloris-style attack with small backlog is fatal).
+    MAX_POST_BYTES = 1024 * 1024
+
     def do_POST(self) -> None:
         if self.path not in ("/", "/invoke"):
             self._send_error(404, "Not found")
             return
 
-        length = int(self.headers.get("Content-Length", 0))
-        if not length:
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+        except ValueError:
+            self._send_error(400, "Invalid Content-Length")
+            return
+
+        if length <= 0:
             self._send_error(400, "Missing request body")
+            return
+        if length > self.MAX_POST_BYTES:
+            self._send_error(413, f"Request body too large (max {self.MAX_POST_BYTES} bytes)")
             return
 
         try:
             body = self.rfile.read(length)
             req = json.loads(body)
-        except json.JSONDecodeError as e:
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as e:
             self._send_error(400, f"Invalid JSON: {e}")
             return
 
-        action = req.get("action", "")
-        params = req.get("params", {})
+        # JSON parsed to a non-object (e.g. list, scalar) crashes every
+        # downstream helper that calls .get(). Reject explicitly with 400
+        # rather than letting AttributeError leak as 500.
+        if not isinstance(req, dict):
+            self._send_error(400, "Request body must be a JSON object")
+            return
 
-        if not action:
-            self._send_error(400, "Missing action")
+        action = req.get("action", "")
+        if not isinstance(action, str) or not action:
+            self._send_error(400, "Missing or invalid 'action' (must be a non-empty string)")
+            return
+
+        params = req.get("params", {})
+        if not isinstance(params, dict):
+            self._send_error(400, "'params' must be a JSON object")
             return
 
         try:
@@ -2229,11 +2252,10 @@ class NapCatHandler(BaseHTTPRequestHandler):
                 "reply_by_mid_cqcode", "reply_by_mid_at", "reply_by_mid_json",
                 "get_events", "get_event", "get_alerts", "clear_alert",
                 "clear_all_alerts", "list_groups", "list_friends", "list_time_ranges",
-                "list_messages", "get_message", "get_stats",
-                "mark_seen", "mark_read", "mark_read_up_to", "get_unread_count",
                 "list_message_content", "get_message_content", "describe_action",
                 "send_group_message", "send_private_message",
                 "get_image", "ocr_image", "napcat_delete_msg",
+                "get_status",
             }
             if action_name in _DISPATCH_ONLY_ACTIONS:
                 return {"action": action_name, "description": "Action implemented in _dispatch (no ACTION_SCHEMAS entry)", "dispatch_only": True}
@@ -2300,6 +2322,11 @@ class NapCatHandler(BaseHTTPRequestHandler):
             from napcat_cli.lib.api import NapCatAPI
             api = NapCatAPI()
             return api.call("set_group_name", **params)
+        # ---- napcat-based proxy for standard OneBot actions ----
+        if action == "get_status":
+            from napcat_cli.lib.api import NapCatAPI
+            api = NapCatAPI()
+            return api.call("get_status")
 
         # Proxy NapCat API calls through napcat_ prefix
         if action.startswith("napcat_"):
@@ -2325,7 +2352,18 @@ def run_http_server(
     NapCatHandler.events_reader = EventsReader(cache.data_dir)
     NapCatHandler.skillsfs_manager = skillsfs_manager
 
-    server = HTTPServer((host, port), NapCatHandler)
+    class _ReusableThreadingHTTPServer(HTTPServer):
+        """HTTPServer with larger backlog and per-request timeout.
+
+        Default backlog=1 makes the server trivially DoS-able via slow
+        connections. Bump it to 64 and set timeout so a single hanging
+        client cannot pin a worker forever, plus reuse to avoid TIME_WAIT.
+        """
+        request_queue_size = 64
+        timeout = 30
+        allow_reuse_address = True
+
+    server = _ReusableThreadingHTTPServer((host, port), NapCatHandler)
     t = threading.Thread(target=server.serve_forever, daemon=True)
     t.start()
     processor.log(f"HTTP provider listening on {host}:{port}")

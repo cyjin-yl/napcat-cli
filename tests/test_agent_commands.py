@@ -350,3 +350,230 @@ class TestFoundBugFixes2:
         rc, out, err = _run("--data-dir /nonexistent/path/xyz123 status",
                             data_dir="/nonexistent/path/xyz123")
         assert "Traceback" not in (err or ""), f"data_dir crash: {err}"
+
+class TestHttpProviderEdgeCases:
+    """Edge-case input handling in do_POST (from stress-test findings).
+
+    Covers:
+      BUG-1: JSON array crashes with no response
+      BUG-2: No Content-Length upper bound (DoS hang)
+      BUG-3: UnicodeDecodeError escapes handler
+      BUG-4: Non-string action produces unhandled 500
+    """
+
+    port: int = 0
+    server = None
+    thread = None
+
+    @classmethod
+    def setup_class(cls):
+        import socket
+        import threading
+        from http.server import HTTPServer
+        from napcat_cli.daemon.watch import NapCatHandler
+        from unittest.mock import MagicMock
+        from pathlib import Path
+
+        NapCatHandler.processor = MagicMock()
+        NapCatHandler.cache = MagicMock()
+        cls._tmpdir = Path("/tmp/napcat-test-edge-http")
+        cls._tmpdir.mkdir(parents=True, exist_ok=True)
+        NapCatHandler.cache.data_dir = cls._tmpdir
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(("127.0.0.1", 0))
+        cls.port = sock.getsockname()[1]
+        sock.close()
+
+        cls.server = HTTPServer(("127.0.0.1", cls.port), NapCatHandler)
+        cls.thread = threading.Thread(
+            target=cls.server.serve_forever, daemon=True
+        )
+        cls.thread.start()
+
+    @classmethod
+    def teardown_class(cls):
+        if cls.server:
+            cls.server.shutdown()
+
+    def _post(self, body=b""):
+        """POST /invoke via http.client.  Returns (status, body_bytes)."""
+        import http.client
+        conn = http.client.HTTPConnection(
+            "127.0.0.1", self.port, timeout=5
+        )
+        try:
+            conn.request(
+                "POST", "/invoke", body=body,
+                headers={"Content-Type": "application/json"},
+            )
+            resp = conn.getresponse()
+            return resp.status, resp.read()
+        finally:
+            conn.close()
+
+    def _raw_post(self, body, cl_header="2"):
+        """POST /invoke with arbitrary Content-Length header value (string)."""
+        import socket
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(5)
+        sock.connect(("127.0.0.1", self.port))
+        req = (
+            f"POST /invoke HTTP/1.1\r\n"
+            f"Host: 127.0.0.1:{self.port}\r\n"
+            f"Content-Type: application/json\r\n"
+            f"Content-Length: {cl_header}\r\n"
+            f"Connection: close\r\n"
+            f"\r\n"
+        ).encode() + body
+        sock.sendall(req)
+        resp = b""
+        while True:
+            try:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                resp += chunk
+            except socket.timeout:
+                break
+        sock.close()
+        return resp
+
+    @staticmethod
+    def _status(raw_resp: bytes) -> int:
+        if not raw_resp:
+            return 0
+        first_line = raw_resp.split(b"\r\n")[0]
+        parts = first_line.split(b" ")
+        return int(parts[1]) if len(parts) >= 2 else 0
+
+    # ------------------------------------------------------------------
+    # BUG-1: JSON array / scalar / non-object top-level crashes
+    # ------------------------------------------------------------------
+
+    def test_json_array_returns_400(self):
+        """BUG-1: JSON array must not crash -- returns 400."""
+        status, body = self._post(b"[1, 2, 3]")
+        assert status == 400, f"Expected 400, got {status}: {body}"
+        assert b"JSON object" in body
+
+    def test_json_number_returns_400(self):
+        """JSON number returns 400."""
+        status, body = self._post(b"42")
+        assert status == 400, f"Expected 400, got {status}"
+
+    def test_json_null_returns_400(self):
+        """JSON null returns 400."""
+        status, body = self._post(b"null")
+        assert status == 400, f"Expected 400, got {status}"
+
+    # ------------------------------------------------------------------
+    # BUG-4: Non-string action type
+    # ------------------------------------------------------------------
+
+    def test_action_int_returns_400(self):
+        """BUG-4: int action returns 400, not 500."""
+        status, body = self._post(b'{"action": 12345}')
+        assert status == 400, f"Expected 400, got {status}: {body.decode(errors='replace')}"
+        assert b"action" in body.lower()
+
+    def test_action_bool_returns_400(self):
+        """BUG-4: boolean action returns 400."""
+        status, body = self._post(b'{"action": true}')
+        assert status == 400, f"Expected 400, got {status}"
+
+    def test_action_null_returns_400(self):
+        """Null action returns 400 (missing)."""
+        status, body = self._post(b'{"action": null}')
+        assert status == 400, f"Expected 400, got {status}"
+
+    def test_action_empty_returns_400(self):
+        """Empty-string action returns 400."""
+        status, body = self._post(b'{"action": ""}')
+        assert status == 400, f"Expected 400, got {status}"
+
+    # ------------------------------------------------------------------
+    # BUG-2: Content-Length upper bound
+    # ------------------------------------------------------------------
+
+    def test_content_length_too_large_returns_413(self):
+        """BUG-2: CL above 1MB returns 413 (no hang)."""
+        resp = self._raw_post(b"{}", cl_header=str(2 * 1024 * 1024))
+        assert self._status(resp) == 413, f"Expected 413, got HTTP {self._status(resp)}"
+
+    def test_content_length_just_under_max_returns_200(self):
+        """CL just under 1MB boundary for valid JSON -- 200."""
+        prefix = b'{"action": "get_stats", "params": {"x": "'
+        suffix = b'"}}'
+        padding_len = 1024 * 1024 - len(prefix) - len(suffix) - 50
+        payload = prefix + b"x" * padding_len + suffix
+        status, body = self._post(payload)
+        assert status == 200, (
+            f"Expected 200 for CL just under max, got {status}: "
+            f"{body.decode(errors='replace')[:200]}"
+        )
+
+    # ------------------------------------------------------------------
+    # BUG-3: JSON parse error handling
+    # ------------------------------------------------------------------
+
+    def test_invalid_json_returns_400(self):
+        """Garbage input returns 400."""
+        status, body = self._post(b"<not json>")
+        assert status == 400, f"Expected 400, got {status}"
+
+    def test_empty_body_returns_400(self):
+        """Empty body returns 400."""
+        status, body = self._post(b"")
+        assert status == 400, f"Expected 400, got {status}"
+
+    def test_nonexistent_path_returns_404(self):
+        """Unknown path returns 404."""
+        import http.client
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        try:
+            conn.request("POST", "/nonexistent", body=b"{}",
+                         headers={"Content-Type": "application/json"})
+            resp = conn.getresponse()
+            assert resp.status == 404
+        finally:
+            conn.close()
+
+    # ------------------------------------------------------------------
+    # Content-Length header malformation
+    # ------------------------------------------------------------------
+
+    def test_invalid_content_length_header_returns_400(self):
+        """Non-numeric CL header returns 400."""
+        resp = self._raw_post(b"{}", cl_header="abc")
+        assert self._status(resp) == 400, (
+            f"Expected 400 for invalid CL, got HTTP {self._status(resp)}"
+        )
+
+    def test_negative_content_length_returns_400(self):
+        """Negative CL returns 400."""
+        resp = self._raw_post(b"{}", cl_header="-1")
+        assert self._status(resp) == 400, (
+            f"Expected 400 for negative CL, got HTTP {self._status(resp)}"
+        )
+
+    def test_zero_content_length_returns_400(self):
+        """CL=0 returns 400."""
+        resp = self._raw_post(b"", cl_header="0")
+        assert self._status(resp) == 400, (
+            f"Expected 400 for CL=0, got HTTP {self._status(resp)}"
+        )
+
+    # ------------------------------------------------------------------
+    # Sanity: normal request works
+    # ------------------------------------------------------------------
+
+    def test_valid_describe_action_returns_200(self):
+        """Sanity: normal request works end-to-end."""
+        import json
+        status, body = self._post(
+            b'{"action": "describe_action", "params": {"action": "describe_action"}}'
+        )
+        assert status == 200, f"Expected 200, got {status}: {body}"
+        data = json.loads(body)
+        assert "error" not in data or "dispatch_only" in data
