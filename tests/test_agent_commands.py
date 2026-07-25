@@ -275,14 +275,21 @@ class TestSubagentBugFixes:
         )
 
     def test_describe_action_for_dispatch_only(self):
-        """describe_action should work for actions like get_message_by_mid."""
-        rc, out = subprocess.run(
-            [sys.executable, "-c",
-             "import subprocess; r=subprocess.run(['curl','-s','http://127.0.0.1:18821/invoke?action=describe_action&action=get_message_by_mid'],capture_output=True,text=True); print(r.stdout)"],
-            capture_output=True, text=True, timeout=10, cwd=str(REPO),
-        ).stdout, ""
-        # Won't actually test live HTTP from this Python run, just check existence
-        assert True  # live HTTP tested separately
+        """describe_action should work for dispatch-only actions like get_message_by_mid."""
+        from napcat_cli.daemon.watch import NapCatHandler, EventCache
+        from unittest.mock import MagicMock
+
+        # Create a minimal handler with a mock processor
+        handler = NapCatHandler.__new__(NapCatHandler)
+        handler.processor = MagicMock()
+        handler.cache = MagicMock(spec=EventCache)
+        from pathlib import Path
+        handler.cache.data_dir = Path("/tmp/napcat-test-data")
+        # describe_action for a dispatch-only action should not error
+        result = handler._dispatch("describe_action", {"action": "get_message_by_mid"})
+        assert "error" not in result or "dispatch_only" in result, (
+            f"describe_action for get_message_by_mid failed: {result}"
+        )
 
 
 class TestEventsNoUnboundText:

@@ -2275,6 +2275,32 @@ class NapCatHandler(BaseHTTPRequestHandler):
             target = image_path or image_url
             text = ocr_file(target)
             return {"text": text, "source": target}
+        # ---- Group management actions (skills-fs config uses these names) ----
+        if action == "group_leave":
+            from napcat_cli.lib.api import NapCatAPI
+            api = NapCatAPI()
+            return api.call("set_group_leave", **params)
+        if action == "send_group_notice":
+            from napcat_cli.lib.api import NapCatAPI
+            api = NapCatAPI()
+            return api.call("_send_group_notice", **params)
+        if action == "send_poke":
+            from napcat_cli.lib.api import NapCatAPI
+            api = NapCatAPI()
+            return api.call("send_poke", **params)
+        if action == "set_friend_remark":
+            from napcat_cli.lib.api import NapCatAPI
+            api = NapCatAPI()
+            return api.call("set_friend_remark", **params)
+        if action == "set_group_card":
+            from napcat_cli.lib.api import NapCatAPI
+            api = NapCatAPI()
+            return api.call("set_group_card", **params)
+        if action == "set_group_name":
+            from napcat_cli.lib.api import NapCatAPI
+            api = NapCatAPI()
+            return api.call("set_group_name", **params)
+
         # Proxy NapCat API calls through napcat_ prefix
         if action.startswith("napcat_"):
             from napcat_cli.lib.api import NapCatAPI
