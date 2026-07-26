@@ -623,6 +623,9 @@ def cmd_daemon(args: argparse.Namespace, api: NapCatAPI) -> int:
             "skills_fs_mountpoint": cfg.skills_fs_mountpoint,
             "skills_fs_binary": cfg.skills_fs_binary,
             "skills_fs_config": cfg.skills_fs_config,
+            "napcat_deployment": cfg.napcat_deployment,
+            "napcat_container": cfg.napcat_container,
+            "napcat_root": cfg.napcat_root,
             "wake_enabled": cfg.wake_enabled,
             "wake_preset": cfg.wake_preset,
             "wake_primary": cfg.wake_primary,
@@ -985,6 +988,9 @@ def cmd_config(args: argparse.Namespace, api: NapCatAPI) -> int:
             ("skills_fs_mountpoint", cfg.skills_fs_mountpoint),
             ("skills_fs_binary", cfg.skills_fs_binary),
             ("skills_fs_config", cfg.skills_fs_config),
+            ("napcat_deployment", cfg.napcat_deployment),
+            ("napcat_container", cfg.napcat_container),
+            ("napcat_root", cfg.napcat_root),
         ]
         for key, val in items:
             print(f"{key}: {val}")
@@ -1061,53 +1067,15 @@ def cmd_auth(args: argparse.Namespace, api: NapCatAPI) -> int:
     return 1
 
 
-def _find_napcat_root() -> str:
-    """Best-effort locate the NapCat installation root.
-
-    Docker:    /app/napcat (inside container)
-    Bare-metal: common paths like ~/.napcat, /opt/napcat, etc.
-    Returns "" if not found.
-    """
+def _docker_cmd(cmd_args: list[str], *, timeout: int = 10) -> tuple[bool, str]:
+    """Run a docker command with sudo fallback. Returns (ok, stdout)."""
     import subprocess
-    candidates = []
-
-    # 1. Docker — try docker exec (may need sudo)
-    try:
-        r = subprocess.run(
-            ["docker", "exec", "napcat", "ls", "/app/napcat"],
-            capture_output=True, text=True, timeout=5,
-        )
-        if r.returncode == 0:
-            return "docker:/app/napcat"
-    except Exception:
-        pass
-
-    # 2. Bare-metal common paths
-    for p in (
-        os.path.expanduser("~/.napcat"),
-        os.path.expanduser("~/napcat"),
-        "/opt/napcat",
-        "/usr/local/napcat",
-        "/app/napcat",
-    ):
-        if os.path.isdir(p):
-            return p
-
-    # 3. NAPCAT_ROOT env override
-    env_root = os.environ.get("NAPCAT_ROOT", "").strip()
-    if env_root and os.path.isdir(env_root):
-        return env_root
-
-    return ""
-
-
-def _docker_exec(*cmd_args: str, timeout: int = 10) -> tuple[bool, str]:
-    """Run docker exec with sudo fallback. Returns (ok, stdout)."""
-    import subprocess
-    for prefix in (["docker"], ["sudo", "-n", "docker"]):
+    cfg = get_config()
+    # container name resolved from config in callers
+    for prefix in ([], ["sudo", "-n"]):
         try:
             r = subprocess.run(
-                prefix + ["exec", "napcat"] + list(cmd_args),
+                prefix + ["docker"] + cmd_args,
                 capture_output=True, text=True, timeout=timeout,
             )
             if r.returncode == 0:
@@ -1117,130 +1085,87 @@ def _docker_exec(*cmd_args: str, timeout: int = 10) -> tuple[bool, str]:
     return False, ""
 
 
-def _docker_cp(src: str, dst: str) -> bool:
-    """docker cp with sudo fallback."""
-    import subprocess
-    for prefix in (["docker"], ["sudo", "-n", "docker"]):
-        try:
-            r = subprocess.run(
-                prefix + ["cp", src, dst],
-                capture_output=True, text=True, timeout=10,
-            )
-            if r.returncode == 0:
-                return True
-        except Exception:
-            continue
-    return False
-
-
-def _docker_logs_tail(n: int = 50) -> str:
-    """docker logs --tail with sudo fallback."""
-    import subprocess
-    for prefix in (["docker"], ["sudo", "-n", "docker"]):
-        try:
-            r = subprocess.run(
-                prefix + ["logs", "--tail", str(n), "napcat"],
-                capture_output=True, text=True, timeout=10,
-            )
-            if r.returncode == 0:
-                return r.stdout
-        except Exception:
-            continue
-    return ""
-
-
-def _docker_restart() -> bool:
-    """docker restart with sudo fallback."""
-    import subprocess
-    for prefix in (["docker"], ["sudo", "-n", "docker"]):
-        try:
-            r = subprocess.run(
-                prefix + ["restart", "napcat"],
-                capture_output=True, text=True, timeout=60,
-            )
-            if r.returncode == 0:
-                return True
-        except Exception:
-            continue
-    return False
-
-
 def _read_napcat_file(rel_path: str) -> str | None:
-    """Read a file from NapCat installation (Docker or bare-metal).
+    """Read a file from NapCat using deployment info from config (not runtime probing)."""
+    cfg = get_config()
+    root = cfg.napcat_root or "/app/napcat"
+    full = f"{root}/{rel_path}"
 
-    Returns file content or None.
-    """
-    import subprocess
-
-    # Docker
-    ok, out = _docker_exec("cat", f"/app/napcat/{rel_path}")
-    if ok and out:
-        return out
-
-    # Bare-metal paths
-    root = _find_napcat_root()
-    if root and not root.startswith("docker:"):
-        p = os.path.join(root, rel_path)
+    if cfg.napcat_deployment == "docker":
+        ok, out = _docker_cmd(["exec", cfg.napcat_container or "napcat", "cat", full])
+        if ok and out:
+            return out
+    else:
+        # bare / remote: direct file read
         try:
-            return open(p, "r", encoding="utf-8", errors="replace").read()
+            return open(full, "r", encoding="utf-8", errors="replace").read()
         except Exception:
             pass
-
-    # NAPCAT_ROOT override
-    env_root = os.environ.get("NAPCAT_ROOT", "").strip()
-    if env_root:
-        p = os.path.join(env_root, rel_path)
-        try:
-            return open(p, "r", encoding="utf-8", errors="replace").read()
-        except Exception:
-            pass
-
     return None
 
 
 def _read_napcat_logs_tail(n: int = 50) -> str:
-    """Read NapCat logs (Docker or bare-metal)."""
-    # Docker
-    out = _docker_logs_tail(n)
-    if out:
-        return out
+    """Read NapCat logs from config-specified deployment."""
+    cfg = get_config()
 
-    # Bare-metal: check common log locations
-    root = _find_napcat_root()
-    if root and not root.startswith("docker:"):
-        for log_rel in ("logs", "log", "../logs"):
+    if cfg.napcat_deployment == "docker":
+        ok, out = _docker_cmd(["logs", "--tail", str(n), cfg.napcat_container or "napcat"])
+        if ok:
+            return out
+    else:
+        root = cfg.napcat_root or "/app/napcat"
+        for log_rel in ("logs", "log"):
+            import glob
             log_dir = os.path.join(root, log_rel)
             if os.path.isdir(log_dir):
-                import glob
                 files = sorted(glob.glob(os.path.join(log_dir, "*.log")), reverse=True)
                 if files:
                     try:
                         return open(files[0], "r", encoding="utf-8", errors="replace").read()[-5000:]
                     except Exception:
                         pass
-
     return ""
 
 
 def _copy_napcat_file(rel_path: str, dest: str) -> bool:
-    """Copy a file from NapCat to local path (Docker or bare-metal)."""
-    # Docker
-    if _docker_cp(f"napcat:/app/napcat/{rel_path}", dest):
-        return True
+    """Copy a file from NapCat to local path."""
+    import os
+    import shutil
+    cfg = get_config()
+    root = cfg.napcat_root or "/app/napcat"
+    full = f"{root}/{rel_path}"
 
-    # Bare-metal
-    root = _find_napcat_root()
-    if root and not root.startswith("docker:"):
-        src = os.path.join(root, rel_path)
-        if os.path.exists(src):
-            import shutil
+    if cfg.napcat_deployment == "docker":
+        ok, _ = _docker_cmd(["cp", f"{cfg.napcat_container or 'napcat'}:{full}", dest])
+        return ok
+    else:
+        if os.path.exists(full):
             try:
-                shutil.copy2(src, dest)
+                shutil.copy2(full, dest)
                 return True
             except Exception:
                 pass
-
     return False
+
+
+def _restart_napcat() -> bool:
+    """Restart NapCat using deployment info from config."""
+    import subprocess
+    cfg = get_config()
+
+    if cfg.napcat_deployment == "docker":
+        ok, _ = _docker_cmd(["restart", cfg.napcat_container or "napcat"], timeout=60)
+        return ok
+    else:
+        svc = cfg.napcat_container or "napcat"
+        try:
+            r = subprocess.run(
+                ["sudo", "-n", "systemctl", "restart", svc],
+                capture_output=True, text=True, timeout=30,
+            )
+            return r.returncode == 0
+        except Exception:
+            return False
 
 
 def _auth_qr(args: argparse.Namespace, api: NapCatAPI) -> int:
@@ -1339,29 +1264,29 @@ def _auth_quick_login(args: argparse.Namespace, api: NapCatAPI) -> int:
     old = webui.get("autoLoginAccount", "")
     webui["autoLoginAccount"] = qq
 
-    # 2. Write back (Docker: cp into container; bare-metal: write to file)
+    # 2. Write back (Docker: cp into container; bare-metal: file copy)
     import subprocess
     import tempfile
+    import shutil
 
     tmp_path = tempfile.mktemp(suffix=".json")
     with open(tmp_path, "w") as f:
         json.dump(webui, f, indent=4, ensure_ascii=False)
 
     wrote = False
-    # Docker
-    if _docker_cp(tmp_path, "napcat:/app/napcat/config/webui.json"):
-        wrote = True
+    cfg = get_config()
+
+    if cfg.napcat_deployment == "docker":
+        ok, _ = _docker_cmd(["cp", tmp_path, f"{cfg.napcat_container or 'napcat'}:{cfg.napcat_root or '/app/napcat'}/config/webui.json"])
+        if ok:
+            wrote = True
     else:
-        # Bare-metal
-        root = _find_napcat_root()
-        if root and not root.startswith("docker:"):
-            dst = os.path.join(root, "config", "webui.json")
-            try:
-                import shutil
-                shutil.copy2(tmp_path, dst)
-                wrote = True
-            except Exception as e:
-                print(f"Error: could not write {dst}: {e}", file=sys.stderr)
+        dst = os.path.join(cfg.napcat_root or "/opt/napcat", "config", "webui.json")
+        try:
+            shutil.copy2(tmp_path, dst)
+            wrote = True
+        except Exception as e:
+            print(f"Error: could not write {dst}: {e}", file=sys.stderr)
 
     if not wrote:
         print("Error: could not write webui.json. Set NAPCAT_ROOT for bare-metal.", file=sys.stderr)
@@ -1373,7 +1298,7 @@ def _auth_quick_login(args: argparse.Namespace, api: NapCatAPI) -> int:
     print("Restarting NapCat...", file=sys.stderr)
     restarted = False
 
-    if _docker_restart():
+    if _restart_napcat():
         restarted = True
         print("Container restarted. Auto-login should proceed.", file=sys.stderr)
     else:

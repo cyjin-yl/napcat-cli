@@ -29,6 +29,9 @@ def _write_daemon_json(cfg: NapCatConfig, data_dir: str | Path) -> None:
         "skills_fs_mountpoint": cfg.skills_fs_mountpoint,
         "skills_fs_binary": cfg.skills_fs_binary,
         "skills_fs_config": cfg.skills_fs_config,
+        "napcat_deployment": cfg.napcat_deployment,
+        "napcat_container": cfg.napcat_container,
+        "napcat_root": cfg.napcat_root,
         "wake_enabled": cfg.wake_enabled,
         "wake_preset": cfg.wake_preset,
         "wake_primary": cfg.wake_primary,
@@ -389,7 +392,35 @@ def run_setup(non_interactive: bool = False, yes: bool = False, force: bool = Fa
     print(f"  Data dir: {data_dir}")
     print()
 
+    # --- 2b. NapCat deployment ---
+    if non_interactive:
+        cfg.napcat_deployment = os.environ.get("NAPCAT_DEPLOYMENT", "docker")
+        cfg.napcat_container = os.environ.get("NAPCAT_CONTAINER", "napcat")
+        cfg.napcat_root = os.environ.get("NAPCAT_ROOT", "/app/napcat")
+    else:
+        print("  How is NapCat deployed?")
+        print("  [D]ocker (default)  [B]are metal / systemd  [R]emote")
+        try:
+            dep = input("  > ").lower().strip()
+        except (EOFError, KeyboardInterrupt):
+            print(file=sys.stderr)
+            dep = "d"
+        if dep in ("b", "bare", "bare-metal", "metal"):
+            cfg.napcat_deployment = "bare"
+            cfg.napcat_container = _prompt_str("systemd service name", "napcat")
+            cfg.napcat_root = _prompt_str("NapCat install root path", "/opt/napcat")
+        elif dep in ("r", "remote"):
+            cfg.napcat_deployment = "remote"
+            cfg.napcat_root = _prompt_str("NapCat root path on this host", "")
+            cfg.napcat_container = ""
+        else:
+            cfg.napcat_deployment = "docker"
+            cfg.napcat_container = _prompt_str("Docker container name", "napcat")
+            cfg.napcat_root = _prompt_str("NapCat root inside container", "/app/napcat")
+    print()
+
     # --- 3. skills-fs ---
+
     print("[3] skills-fs configuration")
     _skill_dir = str(Path.home() / ".hermes" / "skills" / "napcat-cli")
     if non_interactive:

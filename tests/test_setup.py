@@ -52,6 +52,7 @@ class TestSetupNonInteractive:
             "group_trigger_word", "private_trigger",
             "skills_fs_enabled", "skills_fs_mountpoint",
             "skills_fs_binary", "skills_fs_config",
+            "napcat_deployment", "napcat_container", "napcat_root",
             "wake_enabled", "wake_preset", "wake_primary", "wake_session",
             "wake_http_url", "wake_http_key", "wake_http_session_id", "wake_cli_command",
             "wake_debounce_seconds", "wake_cooldown_seconds",

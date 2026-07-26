@@ -70,6 +70,10 @@ class NapCatConfig:
     skills_fs_binary: str = ""
     skills_fs_mountpoint: str = ""
     skills_fs_config: str = ""
+    # --- NapCat deployment info (asked at setup, not runtime-guessed) ---
+    napcat_deployment: str = "docker"  # docker | bare | remote
+    napcat_container: str = "napcat"   # container name (docker) or service name (bare)
+    napcat_root: str = "/app/napcat"   # NapCat install root inside container/host
     # TUI settings
     tui_show_images: bool = True
 
