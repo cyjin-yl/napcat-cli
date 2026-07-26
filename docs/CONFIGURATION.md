@@ -297,3 +297,16 @@ mountpoint ~/.hermes/skills/napcat-cli
 - Never commit real `token`, `wake_http_key`, or `API_SERVER_KEY`.
 - Examples use `REPLACE_ME` / empty strings only.
 - Daemon logs redact WS `access_token`; `config show` prints `(set)` for keys.
+
+
+## Identity labels in wake prompts
+
+All wake/alert text that names a group or person uses one builder
+(`napcat_cli.lib.identity`):
+
+| Entity | Format | Example |
+|--------|--------|---------|
+| Group | `(群备注)(群名)(群号)` | `()(LUG @ YSU \| 那一刻就像看到原子弹爆炸)(201644592)` |
+| Person | `(群名片)(用户昵称)(QQ号)` | `([hubot] --dangerously-skip-permissions)(復州河野鳥)(1293883574)` |
+
+Empty fields keep the parentheses so the triple is always parseable.

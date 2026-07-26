@@ -75,7 +75,7 @@ _MUST_REPLY_POLICY = (
     "\n**可见性（必读）**：你在本 agent/Hermes 会话里输出的任何文字（包括「我不接」「拒绝」），"
     "**触发此次唤醒的那位 QQ 用户完全看不到**。只有调用 napcat-cli 或 skills-fs 发出的消息才会出现在 QQ。"
     "\n因此：**必须** 调用下列之一，把回复（含拒绝/反驳）真正送到 QQ："
-    "\n  - CLI：`napcat send private <uid> --message \"...\"` / `napcat send group <gid> --message \"...\"` / `napcat reply <mid> --message \"...\"`"
+    "\n  - CLI：`napcat send private <对方QQ号user_id> --message \"...\"` / `napcat send group <群号group_id> --message \"...\"` / `napcat reply group <群号group_id> <触发消息IDmessage_id> --message \"...\"` / `napcat reply private <对方QQ号user_id> <触发消息IDmessage_id> --message \"...\"`"
     "\n  - skills-fs：写入对应 `.../send/text` 或 `.../reply/text`（或 text_raw/image/json 等）"
     "\n- 允许：拒绝帮忙、反驳、吐槽、嘲讽、说「不接这活」——但这些话也必须 **经 napcat-cli/skills-fs 发到 QQ**。"
     "\n- 禁止：只在 agent 会话里写「我不接 / 不回复 / 已处理」却 **不调用** send/reply（QQ 侧=已读不回）。"
@@ -143,61 +143,55 @@ def _extract_image_meta(event: dict) -> str:
 
 
 def _extract_reply_meta(event: dict) -> str:
-    """Extract reply chain metadata from event with full context."""
-    msg = event.get("message") if isinstance(event, dict) else None
-    if not isinstance(msg, list):
+    """Reply-chain context with *labeled* message IDs.
+
+    Critical: ``napcat reply <mid>`` must use the **triggering** user message
+    id (this event's message_id), NOT the bot message being quoted.
+    """
+    from napcat_cli.lib.identity import label_from_event_where, label_from_event_who
+
+    trigger_mid = str(event.get("message_id") or "")
+    # quoted id = message the user is replying to (often the bot's earlier msg)
+    quoted_mid = ""
+    segs = event.get("message", [])
+    if isinstance(segs, list):
+        for seg in segs:
+            if isinstance(seg, dict) and seg.get("type") == "reply":
+                data = seg.get("data") or {}
+                if isinstance(data, dict):
+                    quoted_mid = str(data.get("id") or data.get("message_id") or "")
+                elif isinstance(data, str) and data.strip().lstrip("-").isdigit():
+                    quoted_mid = data.strip()
+                break
+    if not quoted_mid:
+        import re
+        m = re.search(r"\[CQ:reply,id=(-?\d+)\]", str(event.get("raw_message") or ""))
+        if m:
+            quoted_mid = m.group(1)
+    if not trigger_mid and not quoted_mid:
         return ""
-    
-    for seg in msg:
-        if not isinstance(seg, dict):
-            continue
-        seg_type = seg.get("type", "")
-        data = seg.get("data", {})
-        
-        if seg_type == "reply":
-            reply_id = data.get("id", "")
-            if reply_id:
-                # Build detailed reply context
-                parts = [f"回复消息ID: {reply_id}"]
-                
-                # Add group/private context
-                group_id = event.get("group_id", "")
-                sender = event.get("sender", {})
-                sender_name = ""
-                sender_uid = ""
-                if isinstance(event.get("sender"), dict):
-                    sender_name = sender.get("nickname") or ""
-                    sender_uid = str(sender.get("user_id", ""))
-                    card = sender.get("card", "")
-                    if card:
-                        sender_name = f"{sender_name}({card})"
-                
-                if group_id:
-                    parts.append(f"群组: {group_id}")
-                else:
-                    parts.append("私聊")
-                
-                if sender_name or sender_uid:
-                    parts.append(f"发送者: {sender_name}({sender_uid})")
-                
-                # Add message context
-                msg_text = _event_text(event)
-                if msg_text:
-                    parts.append(f"消息内容: {msg_text[:50]}")
-                
-                # Image hints
-                msg = event.get("message") if isinstance(event, dict) else None
-                if isinstance(msg, list):
-                    has_image = any(isinstance(seg, dict) and seg.get("type") == "image" for seg in msg)
-                    if has_image:
-                        parts.append("[含图片] 请使用多模态视觉查看图片，或用 /napcat/get_image 下载，/napcat/groups/.../:message_id/:content 获取媒体内容")
-                    
-                    # Check for merge/forward messages
-                    has_forward = any(isinstance(seg, dict) and seg.get("type") == "forward" for seg in msg)
-                    if has_forward:
-                        parts.append("[合并转发] 请使用 /napcat/groups/:group_id/:time_range/:message_id/:content 获取完整转发内容")
-                return "; ".join(parts)
-    return ""
+
+    parts: list[str] = []
+    if trigger_mid:
+        parts.append(
+            f"触发消息ID(message_id，对方刚发来的这条，`napcat reply` 的 <mid> 必须用它): {trigger_mid}"
+        )
+    if quoted_mid:
+        parts.append(
+            f"你的原消息ID(对方引用/回复的那条，仅上下文，不要当作 napcat reply 的 <mid>): {quoted_mid}"
+        )
+    parts.append(f"群组: {label_from_event_where(event)}")
+    parts.append(f"发送者: {label_from_event_who(event)}")
+    msg_text = _event_text(event)
+    if msg_text:
+        parts.append(f"触发消息内容: {msg_text[:80]}")
+    if isinstance(segs, list):
+        if any(isinstance(seg, dict) and seg.get("type") == "image" for seg in segs):
+            parts.append("[含图片] 请用多模态查看，或 /napcat/get_image 下载")
+        if any(isinstance(seg, dict) and seg.get("type") == "forward" for seg in segs):
+            parts.append("[合并转发] 用 get_message / skills-fs message 路径拉全量")
+    return "; ".join(parts)
+
 
 
 def _event_text(event: dict) -> str:
@@ -215,16 +209,15 @@ def _event_text(event: dict) -> str:
 
 
 def _who(event: dict) -> str:
-    """Extract sender identity string for wake prompt (nickname + user_id)."""
-    sender = event.get("sender") if isinstance(event.get("sender"), dict) else {}
-    nick = sender.get("nickname") or event.get("user_id") or "?"
-    uid = sender.get("user_id") or event.get("user_id") or "?"
-    return f"{nick}({uid})"
+    """Sender as ``(群名片)(用户昵称)(QQ号)``."""
+    from napcat_cli.lib.identity import label_from_event_who
+    return label_from_event_who(event)
 
 
 def _where(event: dict) -> str:
-    g = event.get("group_id")
-    return f"群{g}" if g else "私聊"
+    """Group as ``(群备注)(群名)(群号)`` or ``私聊``."""
+    from napcat_cli.lib.identity import label_from_event_where
+    return label_from_event_where(event)
 
 
 def build_prompt(reason: str, events: list[dict]) -> str:
@@ -246,6 +239,23 @@ def build_prompt(reason: str, events: list[dict]) -> str:
         
         head = f"你在{where}{verb}了" + (f"{n}次" if n > 1 else "")
         body = f"。最近一条来自 {who}：{text}" if text else ""
+        # Explicit IDs for the *triggering* message (required for napcat reply)
+        _ev = events[-1] if events else {}
+        _trigger_mid = str(_ev.get("message_id") or "")
+        _uid = str((_ev.get("sender") or {}).get("user_id") if isinstance(_ev.get("sender"), dict) else _ev.get("user_id") or "")
+        _gid = str(_ev.get("group_id") or "")
+        id_line = ""
+        if _trigger_mid or _uid or _gid:
+            bits = []
+            if _trigger_mid:
+                bits.append(f"触发消息ID(message_id，对方这条，reply 用它)={_trigger_mid}")
+            if _uid:
+                bits.append(f"对方QQ号(user_id)={_uid}")
+            if _gid:
+                bits.append(f"群号(group_id)={_gid}")
+            else:
+                bits.append("会话=私聊(无 group_id)")
+            id_line = "\n[关键ID] " + "; ".join(bits)
         
         # Include image metadata if present
         image_meta = _extract_image_meta(events[-1]) if events else ""
@@ -273,7 +283,7 @@ def build_prompt(reason: str, events: list[dict]) -> str:
             "1) 先读取上下文（napcat events/alerts 或 skills-fs 最近 10-20 条）"
             "2) 有图片 -> 必须先 `napcat get_image` / `/napcat/get_image` 再 OCR/视觉"
             "3) 有合并转发/回复链 -> `napcat get_message` / skills-fs message 路径拉全量"
-            "4) **必须** 调用 napcat-cli 或 skills-fs 向 QQ 发出回复（可反驳/拒绝）；"
+            "4) **必须** 调用 napcat-cli 或 skills-fs 向 QQ 发出回复（可反驳/拒绝）；若用 `napcat reply`，<mid> 必须是上方「触发消息ID」(对方刚发的那条)，不是「你的原消息ID」；"
             "仅在本会话打字 QQ 用户看不到"
             "5) 看到 `Sent message_id=...`（或 FS 写入成功）后再结束本轮"
         )
@@ -301,10 +311,13 @@ def build_prompt(reason: str, events: list[dict]) -> str:
             unread_count = len(seen_status) - seen_count
             context_info += f"\n[已读/未读] 已读 {seen_count} 条，未读 {unread_count} 条"
 
+        from napcat_cli.lib.identity import IDENTITY_LEGEND
         return (
-            f"【QQ {reason}】{head}{body}{meta}{context_hint}{explore_hint}"
+            f"{IDENTITY_LEGEND}\n"
+            f"【QQ {reason}】{head}{body}{id_line}{meta}{context_hint}{explore_hint}"
             f"{context_info}{_MUST_REPLY_POLICY}\n{_PROMPT_FOOTER}"
         )
+
 
     if reason == "NEW_MESSAGE_BACKLOG":
         return (
@@ -343,7 +356,7 @@ def build_prompt(reason: str, events: list[dict]) -> str:
     if reason == "BOT_BANNED":
         e = events[-1] if events else {}
         return (
-            f"【QQ 被禁言】你在{e.get('group_id','?')}被禁言，操作者 {e.get('operator_id','?')}，"
+            f"【QQ 被禁言】你在{_where(e)}被禁言，操作者 {_who({**e, 'user_id': e.get('operator_id'), 'sender': {'user_id': e.get('operator_id')}})}，"
             f"时长 {e.get('duration','?')}s。请知悉。\n{_OPTIONAL_REPLY_POLICY}"
         )
 
@@ -356,7 +369,7 @@ def build_prompt(reason: str, events: list[dict]) -> str:
     if reason in ("NEW_POKE", "PROFILE_LIKE"):
         e = events[-1] if events else {}
         return (
-            f"【QQ 戳一戳】{e.get('sender_id') or e.get('operator_id','?')} 戳了你/赞了你 {n} 次。"
+            f"【QQ 戳一戳】{_who({**e, 'user_id': e.get('sender_id') or e.get('operator_id') or e.get('user_id'), 'sender': e.get('sender') or {'user_id': e.get('sender_id') or e.get('operator_id')}})} 戳了你/赞了你 {n} 次。"
             f"可酌情互动，可以不接。\n{_OPTIONAL_REPLY_POLICY}"
         )
 

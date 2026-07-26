@@ -161,6 +161,95 @@ class EventProcessor:
             self.log(f"process() ERROR: {e}\n{traceback.format_exc()}")
 
 
+
+    @staticmethod
+    def _parse_reply_target_id(event: dict) -> str:
+        """Return the message_id being replied to, or "" if not a reply.
+
+        Accepts structured segments and CQ form ``[CQ:reply,id=123]``.
+        """
+        import re
+        segs = event.get("message", [])
+        if isinstance(segs, list):
+            for seg in segs:
+                if not isinstance(seg, dict) or seg.get("type") != "reply":
+                    continue
+                rdata = seg.get("data", {})
+                if isinstance(rdata, str):
+                    raw = rdata.strip()
+                    if raw.lstrip("-").isdigit():
+                        return raw
+                    try:
+                        import urllib.parse
+                        rdata = json.loads(urllib.parse.unquote(raw))
+                    except Exception:
+                        rdata = {}
+                if isinstance(rdata, dict):
+                    rid = rdata.get("id") or rdata.get("message_id") or ""
+                    if rid != "" and rid is not None:
+                        return str(rid)
+        raw = str(event.get("raw_message", "") or "")
+        m = re.search(r"\[CQ:reply,id=(-?\d+)\]", raw)
+        return m.group(1) if m else ""
+
+    def _message_sender_id(self, message_id: str) -> str:
+        """Best-effort sender user_id for an existing message_id, or ""."""
+        if not message_id:
+            return ""
+        mid_arg: Any
+        try:
+            mid_arg = int(message_id)
+        except (TypeError, ValueError):
+            mid_arg = message_id
+
+        # 1) OneBot get_msg — covers bot outbound not stored in our events DB
+        try:
+            from napcat_cli.lib.api import NapCatAPI
+            result = NapCatAPI().call("get_msg", message_id=mid_arg)
+            if result.get("retcode") == 0:
+                data = result.get("data") or {}
+                sender = data.get("sender") if isinstance(data.get("sender"), dict) else {}
+                uid = str(sender.get("user_id") or data.get("user_id") or "")
+                if uid:
+                    return uid
+        except Exception as e:
+            self.log(f"get_msg({message_id}) failed: {e}")
+
+        # 2) Local events DB
+        try:
+            from napcat_cli.lib.events_sqlite import get_connection
+            from napcat_cli.lib.config import DATA_DIR
+            data_dir = getattr(getattr(self, "writer", None), "data_dir", None) or DATA_DIR
+            conn = get_connection(data_dir)
+            try:
+                row = conn.execute(
+                    "SELECT user_id, raw_json FROM events WHERE message_id = ? "
+                    "ORDER BY id DESC LIMIT 1",
+                    (mid_arg,),
+                ).fetchone()
+            finally:
+                conn.close()
+            if not row:
+                return ""
+            uid = str(row[0] or "")
+            if uid:
+                return uid
+            raw = json.loads(row[1] or "{}")
+            sender = raw.get("sender") if isinstance(raw.get("sender"), dict) else {}
+            return str(sender.get("user_id") or raw.get("user_id") or "")
+        except Exception as e:
+            self.log(f"events DB lookup({message_id}) failed: {e}")
+            return ""
+
+    def _is_reply_to_me(self, event: dict) -> bool:
+        """True if this message is a reply to one of the bot's own messages."""
+        if not self.self_id:
+            return False
+        reply_id = self._parse_reply_target_id(event)
+        if not reply_id:
+            return False
+        return self._message_sender_id(reply_id) == str(self.self_id)
+
     def _handle_message(self, event: dict) -> None:
         msg_type = event.get("message_type", "")
         sender = event.get("sender", {})
@@ -170,8 +259,11 @@ class EventProcessor:
         msg_id = str(event.get("message_id", ""))
         group_id = event.get("group_id", "")
 
+        from napcat_cli.lib.identity import label_person, label_group
+        _person = label_person(sender_id, group_id=group_id, sender=sender if isinstance(sender, dict) else None)
+        _place = label_group(group_id) if group_id else "私聊"
         self.writer.write_alert("NAPCAT_CLI_NEW_MESSAGE", {
-            "summary": f"{nickname}({sender_id}): {str(raw_msg)[:50]}",
+            "summary": f"{_person} @ {_place}: {str(raw_msg)[:50]}",
             "sender_id": sender_id,
             "nickname": nickname,
             "message_type": msg_type,
@@ -206,33 +298,26 @@ class EventProcessor:
                             break
             if is_at_me:
                 self.writer.write_alert("NAPCAT_CLI_AT_ME", {
-                    "summary": f"@mentioned by {nickname} in {'group ' + str(group_id) if group_id else 'DM'}",
+                    "summary": f"@mentioned by {_person} in {_place}",
                     "sender_id": sender_id,
                     "group_id": str(group_id) if group_id else "",
                     "message_id": msg_id,
                 })
                 self._wake("AT_ME", event, self_triggered=(sender_id == self.self_id))
 
-        # Now check for reply segments
-        if isinstance(msg_segments, list):
-            for seg in msg_segments:
-                if isinstance(seg, dict) and seg.get("type") == "reply":
-                    rdata = seg.get("data", {})
-                    if isinstance(rdata, str):
-                        try:
-                            import urllib.parse
-                            rdata = json.loads(urllib.parse.unquote(rdata))
-                        except Exception:
-                            pass
-                    if isinstance(rdata, dict) and str(rdata.get("id", "")) == msg_id:
-                        self.writer.write_alert("NAPCAT_CLI_REPLY_TO_ME", {
-                            "summary": f"Reply from {nickname}",
-                            "sender_id": sender_id,
-                            "group_id": str(group_id) if group_id else "",
-                            "message_id": msg_id,
-                        })
-                        self._wake("REPLY_TO_ME", event, self_triggered=(sender_id == self.self_id))
-                        break
+        # Reply-to-bot: pure quote/reply without @ must still wake (REPLY_TO_ME).
+        # BUGFIX: old code compared reply target id to *this* message_id (always false).
+        # Skip if AT_ME already fired to avoid double immediate wakes.
+        if self.self_id and not is_at_me and self._is_reply_to_me(event):
+            reply_target = self._parse_reply_target_id(event)
+            self.writer.write_alert("NAPCAT_CLI_REPLY_TO_ME", {
+                "summary": f"Reply from {_person} in {_place} to bot message {reply_target}",
+                "sender_id": sender_id,
+                "group_id": str(group_id) if group_id else "",
+                "message_id": msg_id,
+                "reply_to": reply_target,
+            })
+            self._wake("REPLY_TO_ME", event, self_triggered=(sender_id == self.self_id))
         # --- OCR auto-processing for image messages ---
         if isinstance(msg_segments, list):
             for seg in msg_segments:
@@ -271,7 +356,7 @@ class EventProcessor:
             # PRIVATE_TRIGGER wake. Skipped when the DM already @-mentioned the bot
             # (AT_ME fired above) to avoid a duplicate immediate wake.
             self.writer.write_alert("NAPCAT_CLI_DM_ME", {
-                "summary": f"DM from {nickname}({sender_id}): {str(raw_msg)[:50]}",
+                "summary": f"DM from {_person}: {str(raw_msg)[:50]}",
                 "sender_id": sender_id,
                 "group_id": "",
                 "message_id": msg_id,
@@ -335,8 +420,11 @@ class EventProcessor:
             sender_id = str(event.get("user_id", ""))
             group_id = event.get("group_id", "")
             target_id = str(event.get("target_id", ""))
+            from napcat_cli.lib.identity import label_person, label_group
+            _poke_who = label_person(sender_id, group_id=group_id)
+            _poke_where = label_group(group_id) if group_id else "私聊"
             self.writer.write_alert("NAPCAT_CLI_NEW_POKE", {
-                "summary": f"Poke from {sender_id}{' in group ' + str(group_id) if group_id else ''}",
+                "summary": f"Poke from {_poke_who} in {_poke_where}",
                 "sender_id": sender_id,
                 "target_id": target_id,
                 "group_id": str(group_id) if group_id else "",
@@ -481,7 +569,7 @@ class EventProcessor:
         group_id = str(event.get("group_id", ""))
         msg_id = str(event.get("message_id", ""))
         likes = event.get("likes", [])
-        emoji_ids = [l.get("emoji_id", "") for l in likes]
+        emoji_ids = [l.get("emoji_id", "") for l in likes if isinstance(l, dict)]
         is_add = event.get("is_add", True)
         action = "reacted" if is_add else "removed reaction from"
         self.writer.write_alert("NAPCAT_CLI_NOTICE", {
@@ -493,6 +581,10 @@ class EventProcessor:
             "likes": likes,
             "is_add": is_add,
         })
+        # Reaction on the bot's own message is interactive attention — wake once.
+        if self.self_id and msg_id and is_add:
+            if self._message_sender_id(msg_id) == str(self.self_id):
+                self._wake("REPLY_TO_ME", event, self_triggered=(user_id == self.self_id))
 
     # ---- friend sub-handlers ----
 
@@ -556,10 +648,9 @@ class EventProcessor:
         """One-line, grep-friendly summary of the triggering event for logs."""
         if not event:
             return "(no event)"
-        sender = event.get("sender") if isinstance(event.get("sender"), dict) else {}
-        who = sender.get("nickname") or event.get("user_id") or "?"
-        g = event.get("group_id")
-        where = f"group{g}" if g else "dm"
+        from napcat_cli.lib.identity import label_from_event_who, label_from_event_where
+        who = label_from_event_who(event)
+        where = label_from_event_where(event)
         msg = event.get("message") if event.get("message") is not None else event.get("raw_message", "")
         if isinstance(msg, list):
             text = "".join(

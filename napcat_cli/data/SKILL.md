@@ -431,6 +431,8 @@ host ports may be cross-mapped (18800=HTTP, 18801=WS). WS auth needs
 
 For `AT_ME` / `REPLY_TO_ME` / `DM_ME`, the wake prompt includes **强制回复策略**:
 Hermes/agent session text is **invisible** to the QQ user who triggered the wake.
+Identity labels: group `(群备注|此群无备注)(群名)(群号)`, person `(群名片|无群名片)(昵称)(QQ号)`.
+For replies: `napcat reply` mid = **触发消息ID** (user message), never 你的原消息ID.
 Always call `napcat send`/`napcat reply` (or skills-fs write) so the refusal/refutation
 actually appears on QQ. Only non-AT/DM registration wakes may no-op.
 
