@@ -687,18 +687,84 @@ def cmd_batch(args: argparse.Namespace, api: NapCatAPI) -> int:
     return 0 if failed == 0 else 1
 
 
+def _config_help_text() -> str:
+    """Return operator help for configuration pitfalls (also docs/CONFIGURATION.md)."""
+    return """\
+napcat-cli configuration help
+=============================
+
+Files (user state, gitignored):
+  ~/.napcat-data/config.json   CLI + NapCatAPI; source for daemon start rewrite
+  ~/.napcat-data/daemon.json   watch.py runtime (rewritten by: napcat daemon start)
+  ~/.napcat-data/skills-fs.json
+  ~/.hermes/.env               Hermes API_SERVER_KEY (HTTP wake)
+
+Examples in repo (no secrets):
+  napcat_cli/data/config.json.example
+  napcat_cli/data/daemon.json.example
+  napcat_cli/data/onebot11.example.json
+  docs/CONFIGURATION.md        full guide
+
+Commands:
+  napcat config show | get <key> | set <key> <value>
+  After connection/wake changes: napcat daemon stop && napcat daemon start
+
+Common pitfalls
+---------------
+1) OneBot11 network empty
+   QQ can be online while onebot11_<qq>.json has empty httpServers/websocketServers.
+   Symptom: Connection reset / Not logged in. Enable HTTP :3000 + WS :3001 + token.
+
+2) Docker port cross-mapping
+   host 18800→container 3000 (HTTP), host 18801→container 3001 (WS) is common.
+   Set api_url to host HTTP, ws_url to host WS (e.g. ws://127.0.0.1:18801).
+
+3) WS token is ?access_token= on the URL (not a connect JSON frame).
+   Missing query param → retcode 1403, 5s reconnect loop, AT_ME never sticks.
+
+4) Wake transport: HTTP recommended, CLI LEGACY / 不推荐
+   wake_primary=http (default). Need wake_http_url + wake_http_key (Hermes
+   API_SERVER_KEY). CLI exit=0 does NOT mean QQ was replied.
+   Check: grep '[WAKE]' ~/.napcat-data/daemon.log
+   Good: transport=http … /chat -> 200
+
+5) PaddleOCR "not installed"
+   Often only in .test-venv; daemon uses /usr/bin/python3. OCR auto-adds
+   repo .test-venv site-packages, or set NAPCAT_OCR_SITE_PACKAGES / NAPCAT_VENV.
+
+6) skills-fs degraded
+   Status file is napcat/status (not mount-root status). Probe uses /proc/mounts.
+
+Keys (not env names): api_url token ws_port ws_url http_port self_id
+  wake_primary wake_http_url wake_http_key wake_session wake_cli_command
+  group_trigger_word private_trigger skills_fs_*
+
+Env overrides (optional): NAPCAT_API_URL NAPCAT_TOKEN NAPCAT_WS_URL
+  NAPCAT_WAKE_HTTP_KEY HERMES_API_KEY NAPCAT_OCR_SITE_PACKAGES NAPCAT_VENV
+"""
+
+
 def cmd_config(args: argparse.Namespace, api: NapCatAPI) -> int:
     """napcat config - Manage configuration."""
     cfg = get_config()
 
+    if args.subcommand in (None, "help"):
+        print(_config_help_text())
+        return 0
+
     if args.subcommand == "get":
         key = args.key
-        val = getattr(cfg, key, None)
-        if val is not None:
+        if not hasattr(cfg, key):
+            print(f"Unknown key: {key}", file=sys.stderr)
+            print("Run 'napcat config help' for keys and pitfalls.", file=sys.stderr)
+            return 1
+        val = getattr(cfg, key)
+        # Redact secrets on get when printing to tty-like use; still print real
+        # value for scripting — only empty-check guidance.
+        if key in ("token", "wake_http_key") and val:
             print(val)
         else:
-            print(f"Unknown key: {key}", file=sys.stderr)
-            return 1
+            print(val if val is not None else "")
         return 0
 
     elif args.subcommand == "set":
@@ -706,6 +772,7 @@ def cmd_config(args: argparse.Namespace, api: NapCatAPI) -> int:
             cfg.set(args.key, args.value)
         except ValueError as e:
             print(f"Error: {e}", file=sys.stderr)
+            print("Run 'napcat config help' for keys and pitfalls.", file=sys.stderr)
             return 1
         try:
             cfg.save()
@@ -713,16 +780,26 @@ def cmd_config(args: argparse.Namespace, api: NapCatAPI) -> int:
             print(f"Error: cannot save config — data directory does not exist: {e}", file=sys.stderr)
             return 1
         print(f"Set {args.key} = {args.value}", file=sys.stderr)
+        if args.key in (
+            "api_url", "token", "ws_port", "ws_url", "http_port",
+            "wake_primary", "wake_http_url", "wake_http_key", "wake_http_session_id",
+            "wake_session", "wake_cli_command", "wake_enabled", "wake_preset",
+            "skills_fs_enabled", "skills_fs_binary", "skills_fs_mountpoint", "skills_fs_config",
+            "self_id",
+        ):
+            print("Note: restart the daemon to apply (napcat daemon stop && napcat daemon start).",
+                  file=sys.stderr)
         return 0
 
     elif args.subcommand == "show":
         items = [
             ("api_url", cfg.api_url),
-            ("token", cfg.token),
+            ("token", "(set)" if cfg.token else ""),
             ("self_id", cfg.self_id),
             ("data_dir", str(DATA_DIR)),
             ("webhook_port", cfg.webhook_port),
             ("ws_port", cfg.ws_port),
+            ("ws_url", cfg.ws_url),
             ("http_port", cfg.http_port),
             ("wake_on_event", cfg.wake_on_event),
             ("wake_command", cfg.wake_command),
@@ -737,13 +814,20 @@ def cmd_config(args: argparse.Namespace, api: NapCatAPI) -> int:
             ("wake_debounce_seconds", cfg.wake_debounce_seconds),
             ("wake_cooldown_seconds", cfg.wake_cooldown_seconds),
             ("wake_new_message_idle_seconds", cfg.wake_new_message_idle_seconds),
+            ("skills_fs_enabled", cfg.skills_fs_enabled),
+            ("skills_fs_mountpoint", cfg.skills_fs_mountpoint),
+            ("skills_fs_binary", cfg.skills_fs_binary),
+            ("skills_fs_config", cfg.skills_fs_config),
         ]
         for key, val in items:
             print(f"{key}: {val}")
+        print("# Run 'napcat config help' for pitfalls (OneBot11, Docker ports, wake HTTP, OCR, FUSE).",
+              file=sys.stderr)
         return 0
 
     else:
         print(f"Unknown config command: {args.subcommand}", file=sys.stderr)
+        print("Usage: napcat config [show|get|set|help]", file=sys.stderr)
         return 1
 
 
@@ -1806,14 +1890,20 @@ def main() -> int:
     am.add_argument("event_ids", nargs="+", type=int, help="Event IDs to mark as read")
 
     # --- config ---
-    config_p = subparsers.add_parser("config", help="Manage configuration")
+    config_p = subparsers.add_parser(
+        "config",
+        help="Manage configuration (show/get/set/help)",
+        description="Read/write ~/.napcat-data/config.json. "
+                    "Run 'napcat config help' for OneBot11, Docker ports, wake HTTP, OCR, FUSE pitfalls.",
+    )
     config_sub = config_p.add_subparsers(dest="subcommand")
     cget = config_sub.add_parser("get", help="Get a config value")
     cget.add_argument("key")
     cset = config_sub.add_parser("set", help="Set a config value")
     cset.add_argument("key")
     cset.add_argument("value")
-    config_sub.add_parser("show", help="Show all config")
+    config_sub.add_parser("show", help="Show all config (secrets redacted)")
+    config_sub.add_parser("help", help="Configuration pitfalls and key reference")
 
     # --- status ---
     subparsers.add_parser("status", help="Check bot login status")

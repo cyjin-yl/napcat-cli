@@ -28,35 +28,40 @@ Each step is logged to `daemon.log` with a `[WAKE]` prefix:
 
 | Transport | Hermes target | Needs | Notes |
 |-----------|---------------|-------|-------|
-| `http` | `POST /api/sessions/{id}/chat` | `wake_http_url` + `wake_http_key` | Best latency, idempotent, injects into a live session; requires the API server enabled |
-| `cli` | `hermes --continue <session> -z "<prompt>" --yolo --pass-session-id` | `hermes` on PATH | Zero infrastructure; spawns a one-shot process per wake |
+| **`http` (recommended, default)** | `POST /api/sessions/{id}/chat` | `wake_http_url` + `wake_http_key` | Synchronous agent turn (often 30–60s). Idempotent. Requires API server. |
+| **`cli` (LEGACY / 不推荐)** | `hermes --continue <session> -z "<prompt>" --yolo --pass-session-id` | `hermes` on PATH | Can `exit=0` without a real QQ reply. |
 
-`wake_primary=auto` (default) tries HTTP first when configured + reachable,
-otherwise falls back to CLI. Force one with `napcat wake --transport http|cli`.
+`wake_primary` defaults to **`http`**. Use `auto` only if you intentionally
+want CLI as last-resort fallback when HTTP is unreachable. Force one with
+`napcat wake --transport http|cli`. Full operator guide:
+[`CONFIGURATION.md`](./CONFIGURATION.md) / `napcat config help`.
 
-## Enable the Hermes HTTP API server (opt-in)
+## Enable the Hermes HTTP API server
 
-The API server is off by default. To use the HTTP transport:
+The API server may already be enabled (`API_SERVER_ENABLED=true` in
+`~/.hermes/.env`). Prefer reusing the existing `API_SERVER_KEY` (setup does
+this) so you do not rotate the key on every run.
 
-1. Append to `~/.hermes/.env` (append-only — don't rewrite):
+1. Ensure `~/.hermes/.env` has:
    ```dotenv
    API_SERVER_ENABLED=true
-   API_SERVER_KEY=<random 64-hex>
+   API_SERVER_KEY=<secret>
    ```
-2. Restart the gateway (systemd, passwordless sudo):
+2. Restart the gateway only if you just enabled it:
    ```bash
    sudo systemctl restart hermes-gateway.service
    ```
-   This briefly interrupts the messaging platforms the gateway serves.
 3. Configure napcat-cli:
    ```bash
+   napcat config set wake_primary http
    napcat config set wake_http_url http://127.0.0.1:8642
    napcat config set wake_http_key <same API_SERVER_KEY>
    # optional: pin a specific session id instead of resolving by name
    napcat config set wake_http_session_id <session-id>
+   napcat daemon stop && napcat daemon start
+   napcat wake test
    ```
-   `napcat setup` does all three interactively when you answer "y" to the
-   HTTP-enable prompt.
+   `napcat setup` wires HTTP by default for the hermes preset.
 
 ### Verified request shape
 

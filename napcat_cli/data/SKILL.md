@@ -376,10 +376,20 @@ Load `~/.napcat-data/skills/persona.md` first to reply in persona on QQ.
 
 Reads and writes configuration stored in `~/.napcat-data/config.json`.
 
-- `napcat config get <key>` — prints the current value of a config key.
-- `napcat config set <key> <value>` — updates a config key.
+- `napcat config help` — **operator pitfalls + key reference** (OneBot11, Docker
+  ports, wake HTTP, OCR, FUSE). Same content as `docs/CONFIGURATION.md`.
+- `napcat config show` — print current values (`token` / `wake_http_key` as `(set)`).
+- `napcat config get <key>` — print one key.
+- `napcat config set <key> <value>` — update a key; restart daemon when the key
+  affects watch.py (connection / wake / skills-fs).
 
-Common keys: `api_url`, `token`, `wake_command`, `wake_on_event`, `ws_port`, `http_port`, `group_trigger_word`, `private_trigger`, `skills_fs_enabled`, `skills_fs_mountpoint`, `skills_fs_binary`, `skills_fs_config`.
+Common keys: `api_url`, `token`, `ws_url`, `ws_port`, `http_port`, `self_id`,
+`wake_primary` (**default `http`**; CLI is LEGACY), `wake_http_url`,
+`wake_http_key`, `wake_session`, `group_trigger_word`, `private_trigger`,
+`skills_fs_enabled`, `skills_fs_mountpoint`, `skills_fs_binary`, `skills_fs_config`.
+
+Env vars (`NAPCAT_API_URL`, `NAPCAT_TOKEN`, `NAPCAT_WAKE_HTTP_KEY`, …) are **not**
+config keys — use `config set` for persistent fields.
 
 ## Platform Identity — Persona (吉他张 CartierRR)
 
@@ -408,6 +418,29 @@ You become 吉他张 (CartierRR) — NOT an AI assistant. Use the persona's tone
 
 ## Pitfalls
 
+### Connection reset / Not logged in while QQ is online
+
+OneBot11 `network.httpServers` / `websocketServers` may be empty, or Docker
+host ports may be cross-mapped (18800=HTTP, 18801=WS). WS auth needs
+`?access_token=` on the URL. Run `napcat config help` or see `docs/CONFIGURATION.md`.
+
+### Wake delivered on CLI but no QQ reply
+
+CLI is **LEGACY / not recommended**. Prefer `wake_primary=http` + Hermes
+`API_SERVER_KEY`. `exit=0` only means the process exited. Expect
+`transport=http` and `/chat -> 200` in `daemon.log`.
+
+### PaddleOCR not installed
+
+Daemon often runs system Python while paddleocr lives in `.test-venv`. OCR
+bootstraps that venv automatically; or set `NAPCAT_OCR_SITE_PACKAGES` /
+`NAPCAT_VENV`.
+
+### skills-fs degraded
+
+Status path is `napcat/status`, not mount-root `status`. Check
+`mountpoint` + `daemon.log` skills-fs lines.
+
 ### Recall Messages Time Out
 
 `napcat recall` may return "NapCat 内核响应超时" (kernel timeout). This is a NapCat kernel issue, not a bot-offline issue. The bot stays online (verify with `napcat status`). Workaround: retry after a delay or use the raw API directly.
@@ -426,7 +459,7 @@ You become 吉他张 (CartierRR) — NOT an AI assistant. Use the persona's tone
 
 ### Config Keys
 
-`napcat config get/set` works with internal NapCat config keys, not environment variables. `NAPCAT_API_URL` etc. are env vars, not config keys.
+`napcat config get/set` works with internal NapCat config keys, not environment variables. `NAPCAT_API_URL` etc. are env vars, not config keys. Run `napcat config help` for the full key list and pitfalls.
 
 ### Events Cache
 
@@ -436,14 +469,6 @@ You become 吉他张 (CartierRR) — NOT an AI assistant. Use the persona's tone
 events = json.loads(subprocess.check_output(["napcat", "events"]))
 messages = [e for e in events if e.get('post_type') != 'meta_event']
 ```
-
-### Alerts
-
-`napcat alerts` shows pending alert categories. To read actual alert data, read the alert files directly from `~/.napcat-data/alerts/`:
-- `NAPCAT_CLI_NEW_MESSAGE.alert` — new messages
-- `NAPCAT_CLI_NEW_POKE.alert` — poke events
-- `NAPCAT_CLI_NOTICE.alert` — system notices
-- `NAPCAT_CLI_NEED_WAKE_UP.alert` — wake-up triggers
 
 ### Message Sending
 

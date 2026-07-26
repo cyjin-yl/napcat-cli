@@ -76,6 +76,14 @@ napcat setup --yes              # skip token validation
 napcat setup --force            # overwrite existing config.json (skills-fs.json only if broken)
 ```
 
+Full operator reference (OneBot11 empty network, Docker port cross-mapping,
+WS `?access_token=`, wake HTTP vs legacy CLI, PaddleOCR venv, skills-fs health):
+
+```bash
+napcat config help
+# or read docs/CONFIGURATION.md
+```
+
 ### NapCat OneBot11 binding & Docker port cross-mapping
 
 NapCat ships with OneBot11 **disabled by default**; you must enable it inside the
@@ -371,23 +379,19 @@ path) — see `napcat_cli/data/SKILL.md`.
    # NOTE: -z - does NOT read stdin. Always use -z "$(cat file)" or -z "literal".
    ```
 
-5. **Send a test @mention to the bot in a group, then check logs:**
-   ```bash
-   grep '\[WAKE\]' ~/.napcat-data/daemon.log | tail -10
-   # Should show: trigger -> queued -> delivered (or failed)
-   ```
-
-#### Common issues
-
 | Symptom | Cause | Fix |
 |---------|-------|-----|
 | Bot doesn't respond to @mentions | Daemon not running, or crash killed event loop | `ps aux \| grep watch.py`; check `daemon.log` for errors; restart daemon |
-| `[WAKE] delivered` but no reply | Agent received prompt but didn't act | Check Hermes session via `hermes sessions list`; verify agent has napcat skills/tools |
-| `[WAKE] failed ... timeout` | Agent took > `wake_timeout` seconds | Increase `wake_timeout` in daemon.json |
-| `[WAKE] failed ... session resolution failed` | HTTP session ID not found | Run `napcat wake sessions` to list; recreate if needed |
-| Multiple replies to one event ("split personality") | Concurrent wakes to same session | Set `wake_primary=http` (or ensure HTTP probe passes); the worker thread serializes wakes through HTTP's fixed session, but CLI one-shot can still create drift |
-| `hermes -z -` sends literal "-" | `-z` takes literal string, not stdin | Use `-z "$(cat {prompt_file})"` template |
-| Events stop after a bad message | Unhandled exception in event handler | Check `daemon.log` for `process() ERROR`; the handler now has try/except |
+| Connection reset / Not logged in while QQ online | Empty OneBot11 network or port cross-map / missing `?access_token=` | `napcat config help`; enable WS+HTTP in container; align `api_url`/`ws_url`/`token` |
+| `[WAKE] delivered` `transport=cli` but no reply | **Legacy CLI** only exited 0 | Set `wake_primary=http` + Hermes `API_SERVER_KEY`; expect `/chat -> 200` |
+| `[WAKE] delivered` http but no reply | Agent turn ran but did not send QQ | Check Hermes session/tools; model 502/fallback in `~/.hermes/logs/agent.log` |
+| `[WAKE] failed ... timeout` | Agent took > `wake_timeout` seconds | Increase `wake_timeout`; HTTP turns can take 30–60s |
+| `[WAKE] failed ... session resolution failed` | HTTP session ID not found | Run `napcat wake sessions`; recreate if needed |
+| `PaddleOCR not installed` | Daemon system Python; package only in `.test-venv` | Auto-bootstrap or `NAPCAT_OCR_SITE_PACKAGES` / `NAPCAT_VENV` — see `napcat config help` |
+| skills-fs degraded | Health probe looked for root `status` | Should use `napcat/status` + `/proc/mounts`; restart daemon on latest |
+| Multiple replies ("split personality") | Concurrent CLI wakes | Prefer `wake_primary=http` |
+| `hermes -z -` sends literal "-" | `-z` takes literal string | Use `-z "$(cat {prompt_file})"` (legacy CLI only) |
+| Events stop after a bad message | Unhandled exception in event handler | Check `daemon.log` for `process() ERROR` |
 
 #### Static analysis (prevents regressions)
 
