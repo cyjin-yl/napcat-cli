@@ -179,7 +179,34 @@ Verify with the same interpreter the daemon uses:
 
 ---
 
-## 6. skills-fs “degraded” while FUSE actually works
+## 6. skills-fs provider URL (HTTP port)
+
+The daemon HTTP provider listens on `http_port` (config key, default **18821**).
+skills-fs calls that provider; the packaged `skills-fs.json` uses:
+
+```json
+"providers": [{ "id": "napcat", "url": "${NAPCAT_PROVIDER_URL}" }]
+```
+
+`napcat daemon start` exports:
+
+- `NAPCAT_HTTP_PORT=<http_port>`
+- `NAPCAT_PROVIDER_URL=http://127.0.0.1:<http_port>/invoke`
+
+so changing the port is only:
+
+```bash
+napcat config set http_port 18824
+napcat daemon stop && napcat daemon start
+```
+
+Do **not** hardcode `18823`/`18824` into the tracked template. If a D-state
+process still holds an old port, pick a free `http_port` instead of editing
+git-tracked JSON.
+
+Override either env var manually if the provider is remote.
+
+## 7. skills-fs “degraded” while FUSE actually works
 
 Healthy mount still had:
 
@@ -201,7 +228,7 @@ grep 'skills-fs:' ~/.napcat-data/daemon.log | tail
 
 ---
 
-## 7. Config keys (`napcat config get/set`)
+## 8. Config keys (`napcat config get/set`)
 
 These are **dataclass fields**, not env var names. Env overrides still work for
 several connection fields (`NAPCAT_API_URL`, `NAPCAT_TOKEN`, …).
@@ -225,7 +252,7 @@ with `napcat config set` so they survive restarts.
 
 ---
 
-## 8. Quick checklist after a broken night
+## 9. Quick checklist after a broken night
 
 ```bash
 # A. QQ + OneBot
@@ -248,7 +275,7 @@ mountpoint ~/.hermes/skills/napcat-cli
 
 ---
 
-## 9. Security notes
+## 10. Security notes
 
 - Never commit real `token`, `wake_http_key`, or `API_SERVER_KEY`.
 - Examples use `REPLACE_ME` / empty strings only.

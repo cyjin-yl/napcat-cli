@@ -745,11 +745,23 @@ class SkillsFsManager:
         binary: str = "",
         config: str = _DEFAULT_SKILLSFS_CONFIG,
         pidfile: str = "",
+        provider_url: str = "",
+        http_port: int | None = None,
     ):
         self.processor = processor
         self.mountpoint = mountpoint
         self.pidfile = pidfile or (DATA_DIR / "skills-fs.pid").as_posix()
         self.config = config
+        # HTTP provider URL for skills-fs ${NAPCAT_PROVIDER_URL} expansion.
+        # Prefer explicit provider_url; else derive from http_port / env / default 18821.
+        if provider_url:
+            self.provider_url = provider_url
+        else:
+            port = http_port if http_port is not None else int(os.environ.get("NAPCAT_HTTP_PORT", "18821"))
+            self.provider_url = os.environ.get(
+                "NAPCAT_PROVIDER_URL",
+                f"http://127.0.0.1:{port}/invoke",
+            )
 
         # Resolve binary: config > shipped > PATH
         self.binary = binary
@@ -822,9 +834,20 @@ class SkillsFsManager:
             "--daemon",
         ]
         try:
-            self.processor.log(f"skills-fs: spawning {args}")
+            self.processor.log(f"skills-fs: spawning {args} provider={self.provider_url}")
             import subprocess
-            subprocess.run(args, check=True, timeout=10)
+            child_env = os.environ.copy()
+            # skills-fs expands ${NAPCAT_PROVIDER_URL} in providers[].url
+            child_env["NAPCAT_PROVIDER_URL"] = self.provider_url
+            # convenience for templates that use port only
+            try:
+                from urllib.parse import urlparse
+                _p = urlparse(self.provider_url).port
+                if _p:
+                    child_env["NAPCAT_HTTP_PORT"] = str(_p)
+            except Exception:
+                pass
+            subprocess.run(args, check=True, timeout=10, env=child_env)
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as e:
             self.processor.log(f"skills-fs: spawn failed: {e}")
             self._status = "degraded"
@@ -2647,11 +2670,20 @@ def run_daemon(config_path: str) -> None:
 
     skillsfs_mgr: SkillsFsManager | None = None
     if skills_fs_enabled:
+        # Export provider URL before spawn so a reused process env is consistent.
+        provider_url = (
+            os.environ.get("NAPCAT_PROVIDER_URL")
+            or f"http://127.0.0.1:{http_port}/invoke"
+        )
+        os.environ["NAPCAT_PROVIDER_URL"] = provider_url
+        os.environ["NAPCAT_HTTP_PORT"] = str(http_port)
         skillsfs_mgr = SkillsFsManager(
             processor,
             mountpoint=skills_fs_mountpoint,
             binary=skills_fs_binary,
             config=skills_fs_config,
+            provider_url=provider_url,
+            http_port=http_port,
         )
         skillsfs_mgr.start()
 

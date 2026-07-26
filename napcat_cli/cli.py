@@ -499,6 +499,12 @@ def cmd_daemon(args: argparse.Namespace, api: NapCatAPI) -> int:
             env.setdefault("NAPCAT_TOKEN", cfg.token)
         if cfg.api_url:
             env.setdefault("NAPCAT_API_URL", cfg.api_url)
+        # skills-fs provider URL tracks daemon HTTP provider port (configurable).
+        env["NAPCAT_HTTP_PORT"] = str(cfg.http_port)
+        env.setdefault(
+            "NAPCAT_PROVIDER_URL",
+            f"http://127.0.0.1:{cfg.http_port}/invoke",
+        )
         cmd = [sys.executable, "-m", "napcat_cli.daemon.watch", str(cfg_path)]
         proc = subprocess.Popen(cmd, stdout=open(DATA_DIR / "daemon.log", "a"), stderr=subprocess.STDOUT, env=env)
         print(f"Daemon started (PID: {proc.pid})", file=sys.stderr)
@@ -741,6 +747,7 @@ Keys (not env names): api_url token ws_port ws_url http_port self_id
 
 Env overrides (optional): NAPCAT_API_URL NAPCAT_TOKEN NAPCAT_WS_URL
   NAPCAT_WAKE_HTTP_KEY HERMES_API_KEY NAPCAT_OCR_SITE_PACKAGES NAPCAT_VENV
+  NAPCAT_HTTP_PORT NAPCAT_PROVIDER_URL (skills-fs → daemon /invoke)
 """
 
 
