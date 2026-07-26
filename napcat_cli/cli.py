@@ -895,6 +895,12 @@ Common pitfalls
 6) skills-fs degraded
    Status file is napcat/status (not mount-root status). Probe uses /proc/mounts.
 
+7) http_port stuck (D-state)
+   D-state holders cannot be killed (need reboot). `napcat daemon start` auto-
+   rebinds to a free port, saves http_port, points skills-fs via
+   NAPCAT_PROVIDER_URL — without touching D-state PIDs or FUSE mounts.
+   Healthy listeners still require `napcat daemon stop` first.
+
 Keys (not env names): api_url token ws_port ws_url http_port self_id
   wake_primary wake_http_url wake_http_key wake_session wake_cli_command
   group_trigger_word private_trigger skills_fs_*
