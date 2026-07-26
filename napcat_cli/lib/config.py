@@ -49,7 +49,7 @@ class NapCatConfig:
     # --- generic, pluggable agent wake (Hermes is the default preset, not required) ---
     wake_enabled: bool = True
     wake_preset: str = "hermes"         # hermes | custom | none
-    wake_primary: str = "auto"          # auto | http | cli   (cli is LEGACY / not recommended; auto = http if configured+reachable, else legacy cli fallback)
+    wake_primary: str = "http"         # http | auto | cli  (http recommended; cli is LEGACY; auto = http then legacy cli fallback)
     wake_session: str = "napcat-qq"     # session name (cli --continue / http session lookup)
     wake_http_url: str = ""             # e.g. http://127.0.0.1:8642  (hermes preset default)
     wake_http_key: str = ""             # bearer token (env: NAPCAT_WAKE_HTTP_KEY)

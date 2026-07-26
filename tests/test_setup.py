@@ -35,7 +35,7 @@ class TestSetupNonInteractive:
         assert cfg.wake_preset == "hermes"
         assert cfg.wake_session == "napcat-qq"
         assert cfg.wake_enabled is True
-        assert cfg.wake_primary == "auto"
+        assert cfg.wake_primary == "http"
         assert cfg.wake_command == ""  # legacy broken command cleared
 
     def test_daemon_json_has_all_keys(self, tmp_path):

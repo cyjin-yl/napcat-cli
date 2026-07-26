@@ -1,13 +1,18 @@
-"""OCR integration for napcat-cli using PaddleOCR 3.x with MKLDNN disabled."""
+"""OCR integration for napcat-cli using PaddleOCR 3.x with MKLDNN disabled.
+
+PaddleOCR is an optional heavy dependency. It is commonly installed into a
+project virtualenv (e.g. ``.test-venv``) rather than system Python (PEP 668).
+The daemon is often launched with ``/usr/bin/python3``, so we try a few known
+site-packages locations before giving up with a clear warning.
+"""
 from __future__ import annotations
 
 import hashlib
 import logging
 import os
-import tempfile
-import urllib.request
-from typing import Any, Optional
+import sys
 from pathlib import Path
+from typing import Any, Optional
 
 # Disable Paddle oneDNN/MKLDNN at import time to avoid PIR/oneDNN crash
 os.environ.setdefault("FLAGS_use_onednn", "0")
@@ -33,6 +38,60 @@ def _file_hash(file_path: str) -> str:
     return hasher.hexdigest()
 
 
+
+def _ensure_paddle_on_path() -> None:
+    """If paddleocr is not importable, try known venv site-packages.
+
+    Search order:
+    1. NAPCAT_OCR_SITE_PACKAGES (explicit override)
+    2. NAPCAT_VENV / VIRTUAL_ENV site-packages
+    3. repo-local .test-venv / .venv next to the package tree
+    """
+    try:
+        import paddleocr  # noqa: F401
+        return
+    except ImportError:
+        pass
+
+    candidates: list[Path] = []
+    env_site = os.environ.get("NAPCAT_OCR_SITE_PACKAGES", "").strip()
+    if env_site:
+        candidates.append(Path(env_site))
+    for env_name in ("NAPCAT_VENV", "VIRTUAL_ENV"):
+        root = os.environ.get(env_name, "").strip()
+        if root:
+            candidates.append(Path(root) / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages")
+            candidates.append(Path(root) / "lib" / "python3" / "site-packages")
+    # napcat_cli/lib/ocr.py -> parents[2] == repo root (napcat-cli/)
+    repo = Path(__file__).resolve().parents[2]
+    for venv_name in (".test-venv", ".venv", "venv"):
+        vroot = repo / venv_name
+        candidates.append(vroot / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages")
+        candidates.append(vroot / "lib" / "python3" / "site-packages")
+
+    seen: set[str] = set()
+    for site in candidates:
+        key = str(site)
+        if key in seen:
+            continue
+        seen.add(key)
+        if not site.is_dir():
+            continue
+        if not (site / "paddleocr").exists() and not list(site.glob("paddleocr-*.dist-info")):
+            continue
+        site_s = str(site)
+        if site_s not in sys.path:
+            sys.path.insert(0, site_s)
+            logger.info("OCR: added site-packages for PaddleOCR: %s", site_s)
+        try:
+            import paddleocr  # noqa: F401
+            return
+        except ImportError as e:
+            logger.warning("OCR: site-packages %s present but import failed: %s", site_s, e)
+            # keep trying other candidates
+            continue
+
+
 def get_ocr_instance() -> Optional[Any]:
     """Get or create the global PaddleOCR instance.
     
@@ -45,7 +104,9 @@ def get_ocr_instance() -> Optional[Any]:
         return _ocr_instance if _ocr_available else None
     
     _ocr_init_attempted = True
-    
+
+    _ensure_paddle_on_path()
+
     try:
         from paddleocr import PaddleOCR
         # Disable MKLDNN to avoid PIR/oneDNN crash on CPU
