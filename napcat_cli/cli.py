@@ -53,12 +53,142 @@ def _port_in_use(port: int) -> bool:
     Guards against stacking a second daemon (or starting one while a D-state
     zombie still holds the port)."""
     import socket
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(0.5)
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(0.5)
     try:
-        return s.connect_ex(("127.0.0.1", int(port))) == 0
+        return sock.connect_ex(("127.0.0.1", int(port))) == 0
     finally:
-        s.close()
+        sock.close()
+
+
+def _proc_state(pid: int) -> str | None:
+    """Return single-letter process state from /proc (R/S/D/Z/…), or None if gone.
+
+    Reading /proc/<pid>/stat is safe even when the process is D-state (kernel
+    virtual file; does not enter the FUSE path that put it to sleep).
+    """
+    try:
+        with open(f"/proc/{int(pid)}/stat", "r", encoding="utf-8", errors="replace") as fh:
+            # comm may contain spaces/parens: state is after the last ')'
+            body = fh.read()
+        rparen = body.rfind(")")
+        if rparen < 0:
+            return None
+        parts = body[rparen + 2 :].split()
+        return parts[0] if parts else None
+    except (FileNotFoundError, ProcessLookupError, PermissionError, OSError, ValueError):
+        return None
+
+
+def _is_dstate(pid: int) -> bool:
+    st = _proc_state(pid)
+    return bool(st) and st.startswith("D")
+
+
+def _listener_pids_for_port(port: int) -> list[int]:
+    """Best-effort PIDs listening on TCP *port* via ``ss`` (netlink — never lsof).
+
+    Returns [] if ss is unavailable or parsing fails. Never walks /proc/<pid>/fd
+    of D-state processes (that can hang).
+    """
+    import re
+    import subprocess
+    port = int(port)
+    try:
+        r = subprocess.run(
+            ["ss", "-ltnp", f"sport = :{port}"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return []
+    pids: list[int] = []
+    for m in re.finditer(r"pid=(\d+)", r.stdout or ""):
+        try:
+            pids.append(int(m.group(1)))
+        except ValueError:
+            pass
+    # dedupe preserve order
+    seen: set[int] = set()
+    out: list[int] = []
+    for pid in pids:
+        if pid not in seen:
+            seen.add(pid)
+            out.append(pid)
+    return out
+
+
+def _find_free_http_port(preferred: int, *, span: int = 32) -> int | None:
+    """Return first free port in [preferred, preferred+span) on 127.0.0.1, else None."""
+    preferred = int(preferred)
+    for candidate in range(preferred, preferred + max(1, span)):
+        if not _port_in_use(candidate):
+            return candidate
+    return None
+
+
+def _rebind_http_port_if_needed(cfg) -> int:
+    """If cfg.http_port is free, return it. If held only by D-state/stale napcat
+    watchers (or unkillable listeners), pick a free port, persist it, and return
+    the new value. If a healthy non-D listener holds it, raise RuntimeError.
+
+    Does **not** kill processes and does **not** touch FUSE mounts — safe while
+    another live daemon is serving traffic on a different port.
+    """
+    port = int(cfg.http_port)
+    if not _port_in_use(port):
+        return port
+
+    listeners = _listener_pids_for_port(port)
+    # Classify holders
+    dstate_holders = [p for p in listeners if _is_dstate(p)]
+    live_holders = [p for p in listeners if _proc_state(p) and not _is_dstate(p)]
+
+    # Healthy foreign/our live process still serving this port → operator must stop it
+    if live_holders:
+        raise RuntimeError(
+            f"http_port {port} is in use by healthy process(es) {live_holders}. "
+            f"Stop that daemon first (`napcat daemon stop`) or "
+            f"`napcat config set http_port <free>`."
+        )
+
+    # Port busy but only D-state / unlisted holders — cannot reclaim without reboot.
+    new_port = _find_free_http_port(port + 1)
+    if new_port is None:
+        new_port = _find_free_http_port(18821)
+    if new_port is None:
+        raise RuntimeError(
+            f"http_port {port} is held"
+            + (f" by D-state PID(s) {dstate_holders}" if dstate_holders else "")
+            + " and no free port was found in the search range. "
+            "Reboot to clear D-state, or free a port manually."
+        )
+
+    old = port
+    cfg.http_port = new_port
+    try:
+        cfg.save()
+    except FileNotFoundError as e:
+        raise RuntimeError(
+            f"http_port {old} blocked"
+            + (f" by D-state {dstate_holders}" if dstate_holders else "")
+            + f"; chose {new_port} but could not persist config: {e}"
+        ) from e
+
+    why = (
+        f"D-state PID(s) {dstate_holders} still hold it (unkillable until reboot)"
+        if dstate_holders
+        else "something still accepts TCP there (likely a defunct/D-state holder)"
+    )
+    print(
+        f"Warning: http_port {old} is blocked ({why}). "
+        f"Auto-rebound to {new_port} and saved to config.json. "
+        f"skills-fs follows via NAPCAT_PROVIDER_URL. "
+        f"D-state processes were NOT killed.",
+        file=sys.stderr,
+    )
+    return new_port
 
 
 def _normalize_file_path(path: str) -> str:
@@ -398,21 +528,45 @@ def cmd_daemon(args: argparse.Namespace, api: NapCatAPI) -> int:
         # Refuse to stack a second daemon on the same port — multiple daemons
         # each spawning their own skills-fs on one mountpoint is what deadlocks.
         cfg = get_config()
-        if _port_in_use(cfg.http_port):
-            print(f"Error: http_port {cfg.http_port} already in use (another daemon running, "
-                  f"or a stale/D-state process holding it). Stop it first or change http_port.",
-                  file=sys.stderr)
-            return 1
         # Check for existing daemon before starting a new one
         pid_file = DATA_DIR / "daemon.pid"
         if pid_file.exists():
-            existing_pid = int(pid_file.read_text().strip())
             try:
-                os.kill(existing_pid, 0)  # Check if alive without killing
-                print(f"Daemon already running (PID {existing_pid}). Use 'napcat daemon stop' first.", file=sys.stderr)
-                return 1
-            except ProcessLookupError:
-                pid_file.unlink()  # Stale PID file, clean up
+                existing_pid = int(pid_file.read_text().strip())
+            except ValueError:
+                pid_file.unlink(missing_ok=True)
+                existing_pid = None
+            if existing_pid is not None:
+                st = _proc_state(existing_pid)
+                if st is None:
+                    pid_file.unlink(missing_ok=True)  # gone
+                elif st.startswith("D"):
+                    # Unkillable D-state leftover — do not treat as "already running".
+                    # Leave the process alone (reboot clears it); drop stale pidfile.
+                    print(
+                        f"Warning: daemon.pid points at D-state PID {existing_pid} "
+                        f"(state={st}, unkillable until reboot). Ignoring pidfile; "
+                        f"will start a new daemon on a free http_port.",
+                        file=sys.stderr,
+                    )
+                    pid_file.unlink(missing_ok=True)
+                else:
+                    try:
+                        os.kill(existing_pid, 0)  # exists and not D
+                        print(
+                            f"Daemon already running (PID {existing_pid}, state={st}). "
+                            f"Use 'napcat daemon stop' first.",
+                            file=sys.stderr,
+                        )
+                        return 1
+                    except ProcessLookupError:
+                        pid_file.unlink(missing_ok=True)
+        # If preferred http_port is held by D-state / defunct listener, auto-rebind.
+        try:
+            _rebind_http_port_if_needed(cfg)
+        except RuntimeError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
         # Write config for daemon
         cfg = get_config()
         # Resolve real bot QQ for AT_ME / poke / ban detection. Empty or

@@ -200,9 +200,26 @@ napcat config set http_port 18824
 napcat daemon stop && napcat daemon start
 ```
 
-Do **not** hardcode `18823`/`18824` into the tracked template. If a D-state
-process still holds an old port, pick a free `http_port` instead of editing
-git-tracked JSON.
+Do **not** hardcode host-only ports into the tracked template.
+
+### D-state port holders (auto-rebind)
+
+Linux processes stuck in **D-state** (uninterruptible sleep, often after a hung
+FUSE op) cannot be `kill -9`'d and may keep a TCP listen forever until reboot.
+`napcat daemon start` detects this without touching the D-state process or its
+mounts:
+
+1. If `http_port` is free → use it.
+2. If held only by D-state / defunct napcat watchers → **auto-pick a free port**,
+   `config set` it into `config.json`, export `NAPCAT_PROVIDER_URL`, start.
+3. If held by a **healthy** process → refuse (stop that daemon first).
+
+You should see:
+```text
+Warning: http_port 18823 is blocked (D-state PID(s) [67107] …). Auto-rebound to 18824 …
+```
+Live traffic on another port is not interrupted. Clearing D-state still needs a reboot.
+
 
 Override either env var manually if the provider is remote.
 
