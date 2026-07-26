@@ -53,7 +53,7 @@ class TestSetupNonInteractive:
             "skills_fs_enabled", "skills_fs_mountpoint",
             "skills_fs_binary", "skills_fs_config",
             "wake_enabled", "wake_preset", "wake_primary", "wake_session",
-            "wake_http_url", "wake_http_session_id", "wake_cli_command",
+            "wake_http_url", "wake_http_key", "wake_http_session_id", "wake_cli_command",
             "wake_debounce_seconds", "wake_cooldown_seconds",
             "wake_new_message_idle_seconds",
         }

@@ -675,23 +675,22 @@ async def ws_daemon(ws_url: str, processor: EventProcessor, cache: EventCache, t
 
             try:
                 import aiohttp
-                session = aiohttp.ClientSession()
+                # Always close the session, including on SIGTERM / loop.stop.
+                async with aiohttp.ClientSession() as session:
+                    async with session.ws_connect(authed_url, heartbeat=30) as ws:
+                        processor.log(f"Connected to {ws_url}")
 
-                async with session.ws_connect(authed_url, heartbeat=30) as ws:
-                    processor.log(f"Connected to {ws_url}")
+                        async for msg in ws:
+                            if msg.type == aiohttp.WSMsgType.TEXT:
+                                try:
+                                    event = json.loads(msg.data)
+                                    processor.process(event)
+                                    cache.add(event)
+                                except json.JSONDecodeError:
+                                    processor.log(f"Invalid JSON: {msg.data[:100]}")
+                            elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                                break
 
-                    async for msg in ws:
-                        if msg.type == aiohttp.WSMsgType.TEXT:
-                            try:
-                                event = json.loads(msg.data)
-                                processor.process(event)
-                                cache.add(event)
-                            except json.JSONDecodeError:
-                                processor.log(f"Invalid JSON: {msg.data[:100]}")
-                        elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
-                            break
-
-                await session.close()
                 retry_delay = 5
 
             except ImportError:
@@ -938,22 +937,53 @@ class SkillsFsManager:
         Timeout-guarded: a hung FUSE daemon can never put this process into
         uninterruptible (D) sleep — the blocking probe runs in a daemon thread
         that is abandoned if it doesn't return within ``timeout``.
+
+        Status file lives at ``napcat/status`` (not the mount root). Probing a
+        missing root ``status`` on a slow/hung FUSE was causing false degraded
+        + kill loops; prefer /proc/mounts first (never blocks on FUSE).
         """
         def _probe() -> bool:
-            status_file = Path(self.mountpoint) / "status"
-            if status_file.exists():
-                status_file.read_text()
-                return True
+            # 1) /proc/mounts — kernel VFS, never hangs on FUSE userspace
+            try:
+                with open("/proc/mounts", "r", encoding="utf-8", errors="replace") as fh:
+                    mounted = any(self.mountpoint in line for line in fh)
+            except OSError:
+                mounted = False
+            if not mounted:
+                return False
+            # 2) light getattr so we know FUSE still answers
             os.stat(self.mountpoint)
-            import subprocess
-            result = subprocess.run(["mount"], capture_output=True, text=True, timeout=3)
-            return self.mountpoint in result.stdout
-
-        res = _run_with_timeout(_probe, timeout)
-        if res is _TIMEOUT:
-            self.processor.log(f"skills-fs: mount verify timed out ({timeout}s) — hung FUSE?")
-            return False
-        return res is True
+            # 3) optional status read — real path is napcat/status
+            for rel in ("napcat/status", "status"):
+                try:
+                    status_file = Path(self.mountpoint) / rel
+                    if status_file.is_file():
+                        status_file.read_text(errors="replace")
+                        break
+                except OSError:
+                    # FUSE answered ENOENT or EIO on optional path — still mounted
+                    pass
+            return True
+        # FUSE registration can lag a few hundred ms behind --daemon return.
+        # Retry briefly before declaring unhealthy (avoids kill-loop on healthy mounts).
+        deadline = time.time() + timeout
+        last = False
+        while time.time() < deadline:
+            res = _run_with_timeout(_probe, min(2.0, max(0.2, deadline - time.time())))
+            if res is _TIMEOUT:
+                continue
+            if res is True:
+                return True
+            last = False
+            time.sleep(0.2)
+        if last is False:
+            # Final timed probe for the hang case.
+            res = _run_with_timeout(_probe, 1.0)
+            if res is _TIMEOUT:
+                self.processor.log(f"skills-fs: mount verify timed out ({timeout}s) — hung FUSE?")
+                return False
+            return res is True
+        return False
 
     def _existing_mount_healthy(self) -> bool:
         """True if a skillsfs FUSE mount at our mountpoint is already up and

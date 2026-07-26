@@ -34,8 +34,9 @@ def _write_daemon_json(cfg: NapCatConfig, data_dir: str | Path) -> None:
         "wake_primary": cfg.wake_primary,
         "wake_session": cfg.wake_session,
         "wake_http_url": cfg.wake_http_url,
+        "wake_http_key": cfg.wake_http_key,  # preferred: HTTP wake (CLI is legacy)
         "wake_http_session_id": cfg.wake_http_session_id,
-        "wake_cli_command": cfg.wake_cli_command,
+        "wake_cli_command": cfg.wake_cli_command,  # LEGACY / not recommended
         "wake_debounce_seconds": cfg.wake_debounce_seconds,
         "wake_cooldown_seconds": cfg.wake_cooldown_seconds,
         "wake_new_message_idle_seconds": cfg.wake_new_message_idle_seconds,

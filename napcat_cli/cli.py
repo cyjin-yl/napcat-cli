@@ -474,8 +474,9 @@ def cmd_daemon(args: argparse.Namespace, api: NapCatAPI) -> int:
             "wake_primary": cfg.wake_primary,
             "wake_session": cfg.wake_session,
             "wake_http_url": cfg.wake_http_url,
+            "wake_http_key": cfg.wake_http_key,  # preferred: HTTP wake (CLI is legacy)
             "wake_http_session_id": cfg.wake_http_session_id,
-            "wake_cli_command": cfg.wake_cli_command,
+            "wake_cli_command": cfg.wake_cli_command,  # LEGACY / not recommended
             "wake_debounce_seconds": cfg.wake_debounce_seconds,
             "wake_cooldown_seconds": cfg.wake_cooldown_seconds,
             "wake_new_message_idle_seconds": cfg.wake_new_message_idle_seconds,
@@ -489,6 +490,15 @@ def cmd_daemon(args: argparse.Namespace, api: NapCatAPI) -> int:
         repo_root = str(Path(__file__).resolve().parents[1])
         env = os.environ.copy()
         env["PYTHONPATH"] = repo_root + (os.pathsep + env["PYTHONPATH"]) if env.get("PYTHONPATH") else repo_root
+        # Prefer HTTP wake: propagate key via env so it need not live only in daemon.json.
+        # CLI transport remains available only as legacy fallback when primary=auto.
+        if cfg.wake_http_key:
+            env.setdefault("NAPCAT_WAKE_HTTP_KEY", cfg.wake_http_key)
+            env.setdefault("HERMES_API_KEY", cfg.wake_http_key)
+        if cfg.token:
+            env.setdefault("NAPCAT_TOKEN", cfg.token)
+        if cfg.api_url:
+            env.setdefault("NAPCAT_API_URL", cfg.api_url)
         cmd = [sys.executable, "-m", "napcat_cli.daemon.watch", str(cfg_path)]
         proc = subprocess.Popen(cmd, stdout=open(DATA_DIR / "daemon.log", "a"), stderr=subprocess.STDOUT, env=env)
         print(f"Daemon started (PID: {proc.pid})", file=sys.stderr)
