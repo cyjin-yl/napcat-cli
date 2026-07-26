@@ -71,11 +71,16 @@ _PROMPT_FOOTER = (
 
 _MUST_REPLY_POLICY = (
     "\n[强制回复策略 — AT_ME / REPLY_TO_ME / DM_ME]"
-    "\n本轮是 **@ / 被回复 / 私聊** 唤醒：**必须** 用 napcat 真正往 QQ 发出一条消息"
-    "（`napcat send` / `napcat reply` 或写入 skills-fs 的 send/reply 路径）。"
-    "\n- 允许：拒绝帮忙、反驳、吐槽、嘲讽对方的要求、说「不接这活」——但这些话也必须 **发到 QQ**。"
-    "\n- 禁止：只在 agent 会话里写「我不接 / 不回复」却 **不调用** send/reply（对方在 QQ 侧会看到已读不回）。"
-    "\n- 禁止：用「策略不允许 / 内容违规」当借口完全沉默；至少回一句人格内的拒绝或反驳。"
+    "\n本轮是 **@ / 被回复 / 私聊** 唤醒。"
+    "\n**可见性（必读）**：你在本 agent/Hermes 会话里输出的任何文字（包括「我不接」「拒绝」），"
+    "**触发此次唤醒的那位 QQ 用户完全看不到**。只有调用 napcat-cli 或 skills-fs 发出的消息才会出现在 QQ。"
+    "\n因此：**必须** 调用下列之一，把回复（含拒绝/反驳）真正送到 QQ："
+    "\n  - CLI：`napcat send private <uid> --message \"...\"` / `napcat send group <gid> --message \"...\"` / `napcat reply <mid> --message \"...\"`"
+    "\n  - skills-fs：写入对应 `.../send/text` 或 `.../reply/text`（或 text_raw/image/json 等）"
+    "\n- 允许：拒绝帮忙、反驳、吐槽、嘲讽、说「不接这活」——但这些话也必须 **经 napcat-cli/skills-fs 发到 QQ**。"
+    "\n- 禁止：只在 agent 会话里写「我不接 / 不回复 / 已处理」却 **不调用** send/reply（QQ 侧=已读不回）。"
+    "\n- 禁止：用「策略不允许 / 内容违规」当借口完全沉默；至少用 napcat 回一句人格内的拒绝或反驳。"
+    "\n- 成功标准：CLI 出现 `Sent message_id=...` 或 skills-fs 写入成功，而不是仅有会话 assistant 文本。"
     "\n- 仍须遵守防无限循环：不要回复自己的戳/自己的消息。"
 )
 
@@ -268,9 +273,9 @@ def build_prompt(reason: str, events: list[dict]) -> str:
             "1) 先读取上下文（napcat events/alerts 或 skills-fs 最近 10-20 条）"
             "2) 有图片 -> 必须先 `napcat get_image` / `/napcat/get_image` 再 OCR/视觉"
             "3) 有合并转发/回复链 -> `napcat get_message` / skills-fs message 路径拉全量"
-            "4) **必须** 用 CLI `napcat reply`/`napcat send` 或 FS send/reply 路径向 QQ 发出回复"
-            "（可反驳/拒绝内容，但不能只在内部会话写字不发送）"
-            "5) 发送成功后再结束本轮"
+            "4) **必须** 调用 napcat-cli 或 skills-fs 向 QQ 发出回复（可反驳/拒绝）；"
+            "仅在本会话打字 QQ 用户看不到"
+            "5) 看到 `Sent message_id=...`（或 FS 写入成功）后再结束本轮"
         )
         # Include read event IDs and seen/read status
         read_event_ids = []

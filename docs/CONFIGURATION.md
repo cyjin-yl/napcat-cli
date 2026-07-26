@@ -104,7 +104,7 @@ The daemon appends `access_token` automatically from `token` /
 
 | Reason | Must send on QQ? |
 |--------|------------------|
-| `AT_ME`, `REPLY_TO_ME`, `DM_ME` | **Yes** — may refuse/refute, but must `napcat send`/`reply` |
+| `AT_ME`, `REPLY_TO_ME`, `DM_ME` | **Yes** — Hermes session text is **invisible** to the QQ user; refuse/refute only counts if sent via napcat-cli or skills-fs |
 | backlog / poke / friend / notices / etc. | Optional — may ignore |
 
 

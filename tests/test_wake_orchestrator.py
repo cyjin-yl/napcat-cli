@@ -64,12 +64,16 @@ class TestBuildPrompt:
         p = build_prompt("AT_ME", [{"user_id": 1, "sender": {"nickname": "A", "user_id": 1}, "message": [{"type":"text","data":{"text":"hi"}}], "message_type": "group", "group_id": 9}])
         assert "强制回复" in p
         assert "必须" in p
-        assert "不能只在内部会话写字不发送" in p or "真正往 QQ 发出" in p
+        assert "完全看不到" in p or "看不到" in p
+        assert "napcat-cli" in p or "napcat send" in p
+        assert "skills-fs" in p
 
     def test_dm_me_requires_qq_outbound(self):
         p = build_prompt("DM_ME", [{"user_id": 1, "sender": {"nickname": "A", "user_id": 1}, "message": [{"type":"text","data":{"text":"hi"}}], "message_type": "private"}])
         assert "强制回复" in p
         assert "DM_ME" in p
+        assert "看不到" in p
+        assert "Sent message_id" in p
 
     def test_backlog_is_optional_reply(self):
         p = build_prompt("NEW_MESSAGE_BACKLOG", [{}, {}])

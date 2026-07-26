@@ -430,8 +430,9 @@ host ports may be cross-mapped (18800=HTTP, 18801=WS). WS auth needs
 ### AT/DM/REPLY must send on QQ
 
 For `AT_ME` / `REPLY_TO_ME` / `DM_ME`, the wake prompt includes **强制回复策略**:
-always call `napcat send`/`napcat reply` (or FS write). Refusing the request is OK
-as long as the refusal is **sent to QQ**. Only non-AT/DM registration wakes may no-op.
+Hermes/agent session text is **invisible** to the QQ user who triggered the wake.
+Always call `napcat send`/`napcat reply` (or skills-fs write) so the refusal/refutation
+actually appears on QQ. Only non-AT/DM registration wakes may no-op.
 
 ### Wake delivered on CLI but no QQ reply
 
