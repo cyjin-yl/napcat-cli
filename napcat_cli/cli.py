@@ -1042,11 +1042,13 @@ def cmd_status(args: argparse.Namespace, api: NapCatAPI) -> int:
     return 0
 
 def cmd_auth(args: argparse.Namespace, api: NapCatAPI) -> int:
-    """napcat auth - Login status, QR code, quick login."""
+    """napcat auth - Login status, QR code, quick login.
+
+    Works with both Docker and bare-metal NapCat deployments.
+    """
     sub = getattr(args, "subcommand", None) or "status"
 
     if sub == "status":
-        # Reuse cmd_status logic
         return cmd_status(args, api)
 
     if sub == "qr":
@@ -1059,66 +1061,198 @@ def cmd_auth(args: argparse.Namespace, api: NapCatAPI) -> int:
     return 1
 
 
-def _webui_login() -> str | None:
-    """Login to NapCat WebUI and return a credential token.
+def _find_napcat_root() -> str:
+    """Best-effort locate the NapCat installation root.
 
-    Reads webui.json token from the container, computes SHA256(token + '.napcat'),
-    and POSTs to /api/auth/login on the WebUI port (default 6099).
-    Returns the credential string or None on failure.
+    Docker:    /app/napcat (inside container)
+    Bare-metal: common paths like ~/.napcat, /opt/napcat, etc.
+    Returns "" if not found.
     """
-    import hashlib
-    import urllib.request
-    import urllib.error
+    import subprocess
+    candidates = []
 
-    # 1. Read webui.json from container (try docker exec)
-    webui_token = ""
+    # 1. Docker — try docker exec (may need sudo)
     try:
-        import subprocess
         r = subprocess.run(
-            ["docker", "exec", "napcat", "cat", "/app/napcat/config/webui.json"],
-            capture_output=True, text=True, timeout=10,
+            ["docker", "exec", "napcat", "ls", "/app/napcat"],
+            capture_output=True, text=True, timeout=5,
         )
         if r.returncode == 0:
-            data = json.loads(r.stdout)
-            webui_token = data.get("token", "")
-            webui_port = data.get("port", 6099)
+            return "docker:/app/napcat"
     except Exception:
         pass
 
-    if not webui_token:
-        print("Error: could not read webui.json from container (is NapCat in Docker?)", file=sys.stderr)
-        return None
+    # 2. Bare-metal common paths
+    for p in (
+        os.path.expanduser("~/.napcat"),
+        os.path.expanduser("~/napcat"),
+        "/opt/napcat",
+        "/usr/local/napcat",
+        "/app/napcat",
+    ):
+        if os.path.isdir(p):
+            return p
 
-    # 2. Compute hash and login
-    hash_val = hashlib.sha256(f"{webui_token}.napcat".encode()).hexdigest()
-    body = json.dumps({"hash": hash_val, "totpCode": ""}).encode()
-    req = urllib.request.Request(
-        f"http://127.0.0.1:{webui_port}/api/auth/login",
-        data=body,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            result = json.loads(resp.read())
-        if result.get("code") == 0:
-            cred = (result.get("data") or {}).get("Credential", "")
-            if cred:
-                return cred
-    except Exception as e:
-        print(f"WebUI login failed: {e}", file=sys.stderr)
+    # 3. NAPCAT_ROOT env override
+    env_root = os.environ.get("NAPCAT_ROOT", "").strip()
+    if env_root and os.path.isdir(env_root):
+        return env_root
+
+    return ""
+
+
+def _docker_exec(*cmd_args: str, timeout: int = 10) -> tuple[bool, str]:
+    """Run docker exec with sudo fallback. Returns (ok, stdout)."""
+    import subprocess
+    for prefix in (["docker"], ["sudo", "-n", "docker"]):
+        try:
+            r = subprocess.run(
+                prefix + ["exec", "napcat"] + list(cmd_args),
+                capture_output=True, text=True, timeout=timeout,
+            )
+            if r.returncode == 0:
+                return True, r.stdout
+        except Exception:
+            continue
+    return False, ""
+
+
+def _docker_cp(src: str, dst: str) -> bool:
+    """docker cp with sudo fallback."""
+    import subprocess
+    for prefix in (["docker"], ["sudo", "-n", "docker"]):
+        try:
+            r = subprocess.run(
+                prefix + ["cp", src, dst],
+                capture_output=True, text=True, timeout=10,
+            )
+            if r.returncode == 0:
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _docker_logs_tail(n: int = 50) -> str:
+    """docker logs --tail with sudo fallback."""
+    import subprocess
+    for prefix in (["docker"], ["sudo", "-n", "docker"]):
+        try:
+            r = subprocess.run(
+                prefix + ["logs", "--tail", str(n), "napcat"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if r.returncode == 0:
+                return r.stdout
+        except Exception:
+            continue
+    return ""
+
+
+def _docker_restart() -> bool:
+    """docker restart with sudo fallback."""
+    import subprocess
+    for prefix in (["docker"], ["sudo", "-n", "docker"]):
+        try:
+            r = subprocess.run(
+                prefix + ["restart", "napcat"],
+                capture_output=True, text=True, timeout=60,
+            )
+            if r.returncode == 0:
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _read_napcat_file(rel_path: str) -> str | None:
+    """Read a file from NapCat installation (Docker or bare-metal).
+
+    Returns file content or None.
+    """
+    import subprocess
+
+    # Docker
+    ok, out = _docker_exec("cat", f"/app/napcat/{rel_path}")
+    if ok and out:
+        return out
+
+    # Bare-metal paths
+    root = _find_napcat_root()
+    if root and not root.startswith("docker:"):
+        p = os.path.join(root, rel_path)
+        try:
+            return open(p, "r", encoding="utf-8", errors="replace").read()
+        except Exception:
+            pass
+
+    # NAPCAT_ROOT override
+    env_root = os.environ.get("NAPCAT_ROOT", "").strip()
+    if env_root:
+        p = os.path.join(env_root, rel_path)
+        try:
+            return open(p, "r", encoding="utf-8", errors="replace").read()
+        except Exception:
+            pass
+
     return None
 
 
-def _auth_qr(args: argparse.Namespace, api: NapCatAPI) -> int:
-    """Fetch the login QR code from the NapCat container.
+def _read_napcat_logs_tail(n: int = 50) -> str:
+    """Read NapCat logs (Docker or bare-metal)."""
+    # Docker
+    out = _docker_logs_tail(n)
+    if out:
+        return out
 
-    Reads the QR image via docker cp from /app/napcat/cache/qrcode.png,
-    saves it locally, and prints the path. Also tries to extract the
-    decoded QR URL from docker logs.
+    # Bare-metal: check common log locations
+    root = _find_napcat_root()
+    if root and not root.startswith("docker:"):
+        for log_rel in ("logs", "log", "../logs"):
+            log_dir = os.path.join(root, log_rel)
+            if os.path.isdir(log_dir):
+                import glob
+                files = sorted(glob.glob(os.path.join(log_dir, "*.log")), reverse=True)
+                if files:
+                    try:
+                        return open(files[0], "r", encoding="utf-8", errors="replace").read()[-5000:]
+                    except Exception:
+                        pass
+
+    return ""
+
+
+def _copy_napcat_file(rel_path: str, dest: str) -> bool:
+    """Copy a file from NapCat to local path (Docker or bare-metal)."""
+    # Docker
+    if _docker_cp(f"napcat:/app/napcat/{rel_path}", dest):
+        return True
+
+    # Bare-metal
+    root = _find_napcat_root()
+    if root and not root.startswith("docker:"):
+        src = os.path.join(root, rel_path)
+        if os.path.exists(src):
+            import shutil
+            try:
+                shutil.copy2(src, dest)
+                return True
+            except Exception:
+                pass
+
+    return False
+
+
+def _auth_qr(args: argparse.Namespace, api: NapCatAPI) -> int:
+    """Fetch the login QR code from NapCat (Docker or bare-metal).
+
+    Tries in order:
+    1. Copy qrcode.png from NapCat cache dir
+    2. Extract QR decode URL from NapCat logs
+    3. NapCat WebUI QR endpoint (if cred available)
     """
-    import subprocess
     import os
+    import re
 
     # Check if bot is already online
     try:
@@ -1127,96 +1261,137 @@ def _auth_qr(args: argparse.Namespace, api: NapCatAPI) -> int:
             uid = login["data"]["user_id"]
             nick = login["data"].get("nickname", "")
             print(f"Bot is already online: {nick} ({uid})", file=sys.stderr)
-            print("No QR code needed. Use 'napcat auth qr' only when offline.", file=sys.stderr)
+            print("No QR code needed.", file=sys.stderr)
             return 0
     except Exception:
         pass
 
-    # 1. Try docker cp qrcode.png
     qr_path = "/tmp/napcat-login-qr.png"
-    try:
-        subprocess.run(
-            ["docker", "cp", "napcat:/app/napcat/cache/qrcode.png", qr_path],
-            check=True, timeout=10,
-        )
+    found = False
+
+    # 1. Copy qrcode.png from cache
+    if _copy_napcat_file("cache/qrcode.png", qr_path):
         if os.path.exists(qr_path) and os.path.getsize(qr_path) > 100:
             print(f"QR code image saved: {qr_path}", file=sys.stderr)
-            print(f"Open it and scan with mobile QQ to login.", file=sys.stderr)
-            # Also print path to stdout for programmatic access
+            print("Open it and scan with mobile QQ to login.", file=sys.stderr)
             print(qr_path)
-            return 0
-    except Exception as e:
-        print(f"Warning: could not copy qrcode.png from container: {e}", file=sys.stderr)
+            found = True
 
-    # 2. Try extracting decoded URL from docker logs
-    try:
-        r = subprocess.run(
-            ["docker", "logs", "--tail", "50", "napcat"],
-            capture_output=True, text=True, timeout=10,
-        )
-        import re
-        for line in r.stdout.splitlines():
-            m = re.search(r"https://txz\.qq\.com/p\?k=\S+", line)
-            if m:
-                url = m.group(0).strip()
-                print(f"QR decode URL (copy to a QR generator website):", file=sys.stderr)
-                print(url)
-                return 0
-    except Exception as e:
-        print(f"Warning: could not read docker logs: {e}", file=sys.stderr)
+    # 2. Extract QR decode URL from logs
+    if not found:
+        logs = _read_napcat_logs_tail(80)
+        urls = re.findall(r"https://txz\.qq\.com/p\?k=\S+", logs)
+        if urls:
+            url = urls[-1].strip()
+            if not found:
+                print("QR decode URL (copy to a QR generator website to scan):", file=sys.stderr)
+            print(url)
+            found = True
 
-    print("Error: no QR code found. NapCat may not be running or is already logged in.", file=sys.stderr)
-    return 1
+    # 3. Also check stdout from NapCat process (bare metal via journalctl/systemctl)
+    if not found:
+        try:
+            import subprocess
+            r = subprocess.run(
+                ["journalctl", "-u", "napcat", "--no-pager", "-n", "80"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if r.returncode == 0:
+                urls = re.findall(r"https://txz\.qq\.com/p\?k=\S+", r.stdout)
+                if urls:
+                    print("QR decode URL from journalctl:", file=sys.stderr)
+                    print(urls[-1].strip())
+                    found = True
+        except Exception:
+            pass
+
+    if not found:
+        print("Error: no QR code found. NapCat may not be running, already logged in,", file=sys.stderr)
+        print("or deployed in a non-standard location (set NAPCAT_ROOT env).", file=sys.stderr)
+        return 1
+
+    return 0
 
 
 def _auth_quick_login(args: argparse.Namespace, api: NapCatAPI) -> int:
-    """Set autoLoginAccount in webui.json and restart the container."""
-    import subprocess
+    """Set autoLoginAccount in webui.json and restart NapCat (Docker or bare-metal)."""
 
     qq = args.qq.strip()
     if not qq.isdigit():
         print(f"Error: QQ must be a number, got {qq!r}", file=sys.stderr)
         return 1
 
-    print(f"Setting autoLoginAccount={qq} in webui.json...", file=sys.stderr)
+    print(f"Setting autoLoginAccount={qq}...", file=sys.stderr)
 
     # 1. Read current webui.json
+    webui_text = _read_napcat_file("config/webui.json")
+    if not webui_text:
+        print("Error: could not read webui.json from NapCat.", file=sys.stderr)
+        print("Set NAPCAT_ROOT env if NapCat is not in Docker.", file=sys.stderr)
+        return 1
+
     try:
-        r = subprocess.run(
-            ["docker", "exec", "napcat", "cat", "/app/napcat/config/webui.json"],
-            capture_output=True, text=True, timeout=10, check=True,
-        )
-        webui = json.loads(r.stdout)
+        webui = json.loads(webui_text)
     except Exception as e:
-        print(f"Error: could not read webui.json: {e}", file=sys.stderr)
+        print(f"Error: could not parse webui.json: {e}", file=sys.stderr)
         return 1
 
     old = webui.get("autoLoginAccount", "")
     webui["autoLoginAccount"] = qq
 
-    # 2. Write back
-    tmp_path = "/tmp/napcat-webui.json"
+    # 2. Write back (Docker: cp into container; bare-metal: write to file)
+    import subprocess
+    import tempfile
+
+    tmp_path = tempfile.mktemp(suffix=".json")
     with open(tmp_path, "w") as f:
         json.dump(webui, f, indent=4, ensure_ascii=False)
-    try:
-        subprocess.run(
-            ["docker", "cp", tmp_path, "napcat:/app/napcat/config/webui.json"],
-            check=True, timeout=10,
-        )
-    except Exception as e:
-        print(f"Error: could not write webui.json: {e}", file=sys.stderr)
+
+    wrote = False
+    # Docker
+    if _docker_cp(tmp_path, "napcat:/app/napcat/config/webui.json"):
+        wrote = True
+    else:
+        # Bare-metal
+        root = _find_napcat_root()
+        if root and not root.startswith("docker:"):
+            dst = os.path.join(root, "config", "webui.json")
+            try:
+                import shutil
+                shutil.copy2(tmp_path, dst)
+                wrote = True
+            except Exception as e:
+                print(f"Error: could not write {dst}: {e}", file=sys.stderr)
+
+    if not wrote:
+        print("Error: could not write webui.json. Set NAPCAT_ROOT for bare-metal.", file=sys.stderr)
         return 1
 
     print(f"Set autoLoginAccount: {old or '(empty)'} -> {qq}", file=sys.stderr)
 
-    # 3. Restart container for fast login
-    print("Restarting NapCat container...", file=sys.stderr)
-    try:
-        subprocess.run(["docker", "restart", "napcat"], check=True, timeout=60)
+    # 3. Restart (Docker: docker restart; bare-metal: systemctl or manual)
+    print("Restarting NapCat...", file=sys.stderr)
+    restarted = False
+
+    if _docker_restart():
+        restarted = True
         print("Container restarted. Auto-login should proceed.", file=sys.stderr)
-    except Exception as e:
-        print(f"Warning: could not restart container: {e}", file=sys.stderr)
-        print("Restart manually: docker restart napcat", file=sys.stderr)
+    else:
+        # Bare-metal: try systemctl
+        try:
+            r = subprocess.run(
+                ["sudo", "-n", "systemctl", "restart", "napcat"],
+                capture_output=True, text=True, timeout=30,
+            )
+            if r.returncode == 0:
+                restarted = True
+                print("NapCat service restarted.", file=sys.stderr)
+        except Exception:
+            pass
+
+    if not restarted:
+        print("Warning: could not auto-restart NapCat.", file=sys.stderr)
+        print("Restart manually: docker restart napcat  OR  sudo systemctl restart napcat", file=sys.stderr)
 
     return 0
 
