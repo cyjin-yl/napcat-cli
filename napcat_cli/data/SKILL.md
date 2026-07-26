@@ -165,21 +165,24 @@ Runs an interactive wizard that configures:
 1. **NapCat connection** — API URL (default `http://127.0.0.1:18801`) and token (validated against the running instance).
 2. **Data directory** — default `~/.napcat-data`.
 3. **skills-fs** — mountpoint, config path, binary detection. Guides you to build or download the Go binary if missing.
-4. **Wake agent** — choose `hermes` (default), `custom`, or `none`. Hermes defaults to the CLI one-shot transport; **CLI is LEGACY / not recommended** — enable the HTTP API server for a reliable wake (`wake_primary=http`). Custom and HTTP-endpoint setups are fully supported; the shell-command backend is kept for experimental/legacy use only.
+4. **Wake agent** — choose `hermes` (default), `custom`, or `none`. Hermes defaults to **HTTP** wake (`wake_primary=http`); **CLI is LEGACY / not recommended**. Custom HTTP endpoints are fully supported; shell-command backend is experimental/legacy only.
 5. **Install skill** — copies this SKILL.md into `~/.hermes/skills/napcat-cli/` for Hermes to discover.
 
 Use `--non-interactive` to skip all prompts (uses defaults). Use `--yes` to auto-confirm actions.
 
 ## Agent Wake (`napcat wake`)
 
+When the daemon wakes you, the prompt summarizes *what* happened (who, where,
 text, counts), so read the prompt before re-querying.
-179:
-180:- `AT_ME` / `REPLY_TO_ME` / `DM_ME` wake you near-immediately and bypass cooldown —
-181:  these expect a prompt reply (`DM_ME` = someone sent you a private/DM message).
-182:  Use `napcat reply <id>` or `napcat send`/`napcat reply` 回复。
-183:- `NEW_MESSAGE_BACKLOG` means unread messages piled up — scan `napcat events` /
-184:  `napcat alerts` 和回复。
-185:
+
+- `AT_ME` / `REPLY_TO_ME` / `DM_ME` wake near-immediately and **must** produce a
+  real QQ outbound via `napcat send` / `napcat reply` (or FS send/reply). You may
+  refuse/refute the content, but silent internal “我不接” without sending is
+  forbidden (`强制回复策略`).
+- Other reasons (backlog / poke / friend / notices / …) may no-op after a quick
+  scan (`可选回复策略`).
+- `NEW_MESSAGE_BACKLOG` means unread messages piled up — scan `napcat events` /
+  `napcat alerts` and reply only if needed.
 ## 图片与 OCR 技能使用指南
 
 ### 图片消息识别
