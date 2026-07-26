@@ -449,7 +449,18 @@ def build_prompt(reason: str, events: list[dict]) -> str:
         )
 
     if reason == "BOT_OFFLINE":
-        return "【QQ 掉线】NapCat bot 连接丢失/离线。请检查容器与登录状态。\n" + _OPTIONAL_REPLY_POLICY
+        from napcat_cli.lib.identity import IDENTITY_LEGEND
+        return (
+            f"{IDENTITY_LEGEND}\n"
+            f"【QQ 掉线】NapCat bot 连接丢失/离线。"
+            f"操作指引："
+            f"1) 用 `napcat auth` 查看登录状态"
+            f"2) 用 `napcat auth qr` 获取二维码图片（保存到 /tmp/），"
+            f"如果已配置快速登录，用 `napcat auth quick-login <QQ号>` 设置并重启容器自动登录"
+            f"3) 将二维码发送到其他平台（微信/Discord）让 owner 扫码："
+            f"示例：读取 /tmp/napcat-login-qr.png 作为图片发送，或打印 QR decode URL 让 owner 生成二维码"
+            f"\n{_OPTIONAL_REPLY_POLICY}\n{_PROMPT_FOOTER}"
+        )
 
     # generic fallback
     summaries = "; ".join(str(e.get("summary", ""))[:60] for e in events if e.get("summary"))

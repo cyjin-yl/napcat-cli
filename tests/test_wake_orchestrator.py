@@ -34,7 +34,7 @@ class TestBuildPrompt:
         p = build_prompt("AT_ME", events)
         assert "AT_ME" in p
         assert "Alice" in p
-        assert "456" in p
+        assert "456" in p  # group or user id still present
         assert "在吗" in p
 
     def test_dm_me_includes_who_text(self):

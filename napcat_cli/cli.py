@@ -1041,6 +1041,185 @@ def cmd_status(args: argparse.Namespace, api: NapCatAPI) -> int:
         return 1
     return 0
 
+def cmd_auth(args: argparse.Namespace, api: NapCatAPI) -> int:
+    """napcat auth - Login status, QR code, quick login."""
+    sub = getattr(args, "subcommand", None) or "status"
+
+    if sub == "status":
+        # Reuse cmd_status logic
+        return cmd_status(args, api)
+
+    if sub == "qr":
+        return _auth_qr(args, api)
+
+    if sub == "quick-login":
+        return _auth_quick_login(args, api)
+
+    print(f"Unknown auth command: {sub}. Use: status, qr, quick-login", file=sys.stderr)
+    return 1
+
+
+def _webui_login() -> str | None:
+    """Login to NapCat WebUI and return a credential token.
+
+    Reads webui.json token from the container, computes SHA256(token + '.napcat'),
+    and POSTs to /api/auth/login on the WebUI port (default 6099).
+    Returns the credential string or None on failure.
+    """
+    import hashlib
+    import urllib.request
+    import urllib.error
+
+    # 1. Read webui.json from container (try docker exec)
+    webui_token = ""
+    try:
+        import subprocess
+        r = subprocess.run(
+            ["docker", "exec", "napcat", "cat", "/app/napcat/config/webui.json"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if r.returncode == 0:
+            data = json.loads(r.stdout)
+            webui_token = data.get("token", "")
+            webui_port = data.get("port", 6099)
+    except Exception:
+        pass
+
+    if not webui_token:
+        print("Error: could not read webui.json from container (is NapCat in Docker?)", file=sys.stderr)
+        return None
+
+    # 2. Compute hash and login
+    hash_val = hashlib.sha256(f"{webui_token}.napcat".encode()).hexdigest()
+    body = json.dumps({"hash": hash_val, "totpCode": ""}).encode()
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{webui_port}/api/auth/login",
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            result = json.loads(resp.read())
+        if result.get("code") == 0:
+            cred = (result.get("data") or {}).get("Credential", "")
+            if cred:
+                return cred
+    except Exception as e:
+        print(f"WebUI login failed: {e}", file=sys.stderr)
+    return None
+
+
+def _auth_qr(args: argparse.Namespace, api: NapCatAPI) -> int:
+    """Fetch the login QR code from the NapCat container.
+
+    Reads the QR image via docker cp from /app/napcat/cache/qrcode.png,
+    saves it locally, and prints the path. Also tries to extract the
+    decoded QR URL from docker logs.
+    """
+    import subprocess
+    import os
+
+    # Check if bot is already online
+    try:
+        login = api.call("get_login_info", timeout=3)
+        if login.get("retcode") == 0 and login.get("data", {}).get("user_id"):
+            uid = login["data"]["user_id"]
+            nick = login["data"].get("nickname", "")
+            print(f"Bot is already online: {nick} ({uid})", file=sys.stderr)
+            print("No QR code needed. Use 'napcat auth qr' only when offline.", file=sys.stderr)
+            return 0
+    except Exception:
+        pass
+
+    # 1. Try docker cp qrcode.png
+    qr_path = "/tmp/napcat-login-qr.png"
+    try:
+        subprocess.run(
+            ["docker", "cp", "napcat:/app/napcat/cache/qrcode.png", qr_path],
+            check=True, timeout=10,
+        )
+        if os.path.exists(qr_path) and os.path.getsize(qr_path) > 100:
+            print(f"QR code image saved: {qr_path}", file=sys.stderr)
+            print(f"Open it and scan with mobile QQ to login.", file=sys.stderr)
+            # Also print path to stdout for programmatic access
+            print(qr_path)
+            return 0
+    except Exception as e:
+        print(f"Warning: could not copy qrcode.png from container: {e}", file=sys.stderr)
+
+    # 2. Try extracting decoded URL from docker logs
+    try:
+        r = subprocess.run(
+            ["docker", "logs", "--tail", "50", "napcat"],
+            capture_output=True, text=True, timeout=10,
+        )
+        import re
+        for line in r.stdout.splitlines():
+            m = re.search(r"https://txz\.qq\.com/p\?k=\S+", line)
+            if m:
+                url = m.group(0).strip()
+                print(f"QR decode URL (copy to a QR generator website):", file=sys.stderr)
+                print(url)
+                return 0
+    except Exception as e:
+        print(f"Warning: could not read docker logs: {e}", file=sys.stderr)
+
+    print("Error: no QR code found. NapCat may not be running or is already logged in.", file=sys.stderr)
+    return 1
+
+
+def _auth_quick_login(args: argparse.Namespace, api: NapCatAPI) -> int:
+    """Set autoLoginAccount in webui.json and restart the container."""
+    import subprocess
+
+    qq = args.qq.strip()
+    if not qq.isdigit():
+        print(f"Error: QQ must be a number, got {qq!r}", file=sys.stderr)
+        return 1
+
+    print(f"Setting autoLoginAccount={qq} in webui.json...", file=sys.stderr)
+
+    # 1. Read current webui.json
+    try:
+        r = subprocess.run(
+            ["docker", "exec", "napcat", "cat", "/app/napcat/config/webui.json"],
+            capture_output=True, text=True, timeout=10, check=True,
+        )
+        webui = json.loads(r.stdout)
+    except Exception as e:
+        print(f"Error: could not read webui.json: {e}", file=sys.stderr)
+        return 1
+
+    old = webui.get("autoLoginAccount", "")
+    webui["autoLoginAccount"] = qq
+
+    # 2. Write back
+    tmp_path = "/tmp/napcat-webui.json"
+    with open(tmp_path, "w") as f:
+        json.dump(webui, f, indent=4, ensure_ascii=False)
+    try:
+        subprocess.run(
+            ["docker", "cp", tmp_path, "napcat:/app/napcat/config/webui.json"],
+            check=True, timeout=10,
+        )
+    except Exception as e:
+        print(f"Error: could not write webui.json: {e}", file=sys.stderr)
+        return 1
+
+    print(f"Set autoLoginAccount: {old or '(empty)'} -> {qq}", file=sys.stderr)
+
+    # 3. Restart container for fast login
+    print("Restarting NapCat container...", file=sys.stderr)
+    try:
+        subprocess.run(["docker", "restart", "napcat"], check=True, timeout=60)
+        print("Container restarted. Auto-login should proceed.", file=sys.stderr)
+    except Exception as e:
+        print(f"Warning: could not restart container: {e}", file=sys.stderr)
+        print("Restart manually: docker restart napcat", file=sys.stderr)
+
+    return 0
+
 
 def cmd_ocr(args: argparse.Namespace, api: NapCatAPI) -> int:
     """napcat ocr - OCR an image."""
@@ -2075,6 +2254,13 @@ def main() -> int:
     # --- status ---
     subparsers.add_parser("status", help="Check bot login status")
 
+    # --- auth ---
+    auth_p = subparsers.add_parser("auth", help="Login status, QR code, quick login")
+    auth_sub = auth_p.add_subparsers(dest="subcommand")
+    auth_sub.add_parser("qr", help="Fetch login QR code from container")
+    ql = auth_sub.add_parser("quick-login", help="Set autoLoginAccount and restart container")
+    ql.add_argument("qq", help="QQ number for quick login")
+
     # --- ocr ---
     ocr_p = subparsers.add_parser("ocr", help="OCR an image")
     ocr_p.add_argument("image", help="Image file path or URL")
@@ -2272,6 +2458,7 @@ def main() -> int:
         "alerts": cmd_alerts,
         "config": cmd_config,
         "status": cmd_status,
+        "auth": cmd_auth,
         "ocr": cmd_ocr,
         "translate": cmd_translate,
         "phone": cmd_phone,
