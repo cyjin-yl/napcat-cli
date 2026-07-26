@@ -640,28 +640,45 @@ class EventCache:
 # WebSocket listener
 # ---------------------------------------------------------------------------
 
-async def ws_daemon(ws_url: str, processor: EventProcessor, cache: EventCache) -> None:
-    """WebSocket daemon - connects to NapCat WS server."""
+async def ws_daemon(ws_url: str, processor: EventProcessor, cache: EventCache, token: str = "") -> None:
+    """WebSocket daemon - connects to NapCat WS server.
+
+    NapCat's OneBot11 WS server authenticates by reading the access token as a
+    `?access_token=<TOKEN>` query parameter on the WebSocket upgrade request —
+    NOT by inspecting any client-sent frame. Sending a frame is too late: by
+    then the server has already decided to reject (retcode 1403,
+    `token验证失败`) and closes the connection. So we append the token to the
+    URL before connecting and don't send any connect-frame.
+    """
     retry_delay = 5
+    authed_url = ws_url
+    if token:
+        # Preserve existing query components; append access_token.
+        from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
+        parts = urlsplit(ws_url)
+        q = dict(parse_qsl(parts.query))
+        q.setdefault("access_token", token)
+        authed_url = urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(q), parts.fragment))
 
     while True:
         try:
-            processor.log(f"Connecting to WebSocket: {ws_url}")
+            # Never log the raw token; redact access_token query values.
+            log_url = authed_url
+            if token and "access_token=" in log_url:
+                from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
+                parts = urlsplit(log_url)
+                q = dict(parse_qsl(parts.query))
+                if "access_token" in q:
+                    q["access_token"] = "***"
+                log_url = urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(q), parts.fragment))
+            processor.log(f"Connecting to WebSocket: {log_url}")
 
             try:
                 import aiohttp
                 session = aiohttp.ClientSession()
 
-                async with session.ws_connect(ws_url, heartbeat=30) as ws:
+                async with session.ws_connect(authed_url, heartbeat=30) as ws:
                     processor.log(f"Connected to {ws_url}")
-
-                    token = os.environ.get("NAPCAT_TOKEN", "")
-                    if token:
-                        await ws.send_json({
-                            "time": int(time.time()),
-                            "post_type": "connect",
-                            "token": token,
-                        })
 
                     async for msg in ws:
                         if msg.type == aiohttp.WSMsgType.TEXT:
@@ -679,7 +696,7 @@ async def ws_daemon(ws_url: str, processor: EventProcessor, cache: EventCache) -
 
             except ImportError:
                 from websockets.asyncio.client import connect
-                async with connect(ws_url, ping_interval=30) as ws:
+                async with connect(authed_url, ping_interval=30) as ws:
                     processor.log(f"Connected to {ws_url}")
                     retry_delay = 5
 
@@ -696,7 +713,6 @@ async def ws_daemon(ws_url: str, processor: EventProcessor, cache: EventCache) -
 
         await asyncio.sleep(retry_delay)
         retry_delay = min(retry_delay * 2, 60)
-
 
 # ---------------------------------------------------------------------------
 # Skills-fs FUSE Manager — spawn, monitor, restart on crash
@@ -2631,7 +2647,7 @@ def run_daemon(config_path: str) -> None:
 
     # Run WS daemon, health check, and skills-fs monitor as parallel tasks
     tasks = [
-        loop.create_task(ws_daemon(ws_url, processor, cache)),
+        loop.create_task(ws_daemon(ws_url, processor, cache, token)),
         loop.create_task(health_check_task(processor, api_url, token)),
     ]
     if skillsfs_mgr is not None:
