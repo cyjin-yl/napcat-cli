@@ -19,10 +19,11 @@ import logging
 import os
 import re
 import signal
+import socket
 import sys
 import time
 import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
@@ -1092,17 +1093,23 @@ class NapCatHandler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: Any) -> None:
         pass  # suppress default logging
 
+    def _write_response(self, data: bytes, status: int, content_type: str) -> None:
+        """Write one bounded response, tolerating clients that disconnect."""
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            return
+
     def _send_json(self, data: Any, status: int = 200) -> None:
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.end_headers()
-        self.wfile.write(json.dumps(data, ensure_ascii=False).encode("utf-8"))
+        payload = json.dumps(data, ensure_ascii=False).encode("utf-8")
+        self._write_response(payload, status, "application/json")
 
     def _send_error(self, status: int, message: str) -> None:
-        self.send_response(status)
-        self.send_header("Content-Type", "text/plain")
-        self.end_headers()
-        self.wfile.write(message.encode("utf-8"))
+        self._write_response(message.encode("utf-8"), status, "text/plain")
 
 
     def do_GET(self) -> None:
@@ -1227,6 +1234,15 @@ class NapCatHandler(BaseHTTPRequestHandler):
 
         try:
             body = self.rfile.read(length)
+        except (TimeoutError, socket.timeout):
+            self.close_connection = True
+            self._send_error(408, "Request body timed out")
+            return
+        if len(body) != length:
+            self.close_connection = True
+            self._send_error(400, "Truncated request body")
+            return
+        try:
             req = json.loads(body)
         except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as e:
             self._send_error(400, f"Invalid JSON: {e}")
@@ -1318,7 +1334,6 @@ class NapCatHandler(BaseHTTPRequestHandler):
         from napcat_cli.lib.api import NapCatAPI
         api = NapCatAPI()
         b64 = self._read_file_b64(path)
-        import os
         name = os.path.basename(path)
         if scope == "group":
             result = api.call("upload_group_file", group_id=target_id, file=f"base64://{b64}", name=name)
@@ -1326,9 +1341,10 @@ class NapCatHandler(BaseHTTPRequestHandler):
             result = api.call("upload_private_file", user_id=target_id, file=f"base64://{b64}", name=name)
         return self._format_send_result(result)
 
-    def _compose_reply(self, base_segments: list, message_id: str) -> list:
-        """Prepend a reply segment to base segments."""
-        return [{"type": "reply", "data": {"id": str(message_id)}}] + base_segments
+    def _compose_reply(self, base_segments: list | str, message_id: str) -> list:
+        """Prepend a reply segment, wrapping smart-text strings as one segment."""
+        segments = base_segments if isinstance(base_segments, list) else [base_segments]
+        return [{"type": "reply", "data": {"id": str(message_id)}}] + segments
 
     def _resolve_payload(self, params: dict, fallback_key: str) -> str:
         """Resolve payload from _payload (skills-fs raw mode) or a named fallback key (HTTP POST)."""
@@ -1782,13 +1798,23 @@ class NapCatHandler(BaseHTTPRequestHandler):
 
         if action == "reply_group_file":
             group_id = str(params.get("group_id", ""))
+            message_id = str(params.get("message_id", ""))
             payload = self._resolve_payload(params, "path")
-            if not group_id or not payload:
-                return {"error": "group_id and payload (file path) are required", "expected_schema": ACTION_SCHEMAS.get("reply_group_file", {})}
+            if not group_id or not message_id or not payload:
+                return {"error": "group_id, message_id, and payload (file path) are required", "expected_schema": ACTION_SCHEMAS.get("reply_group_file", {})}
             try:
-                return self._upload_file("group", group_id, payload)
+                b64 = self._read_file_b64(payload)
             except ValueError as e:
                 return {"error": str(e)}
+            from napcat_cli.lib.api import NapCatAPI
+            api = NapCatAPI()
+            name = os.path.basename(payload)
+            msg = self._compose_reply([
+                {"type": "file", "data": {"file": f"base64://{b64}", "name": name}}
+            ], message_id)
+            r = api.call("send_msg", message_type="group", group_id=int(group_id) if group_id.isdigit() else group_id, message=msg)
+            return self._format_send_result(r)
+
 
         if action == "reply_group_cqcode":
             group_id = str(params.get("group_id", ""))
@@ -1839,6 +1865,9 @@ class NapCatHandler(BaseHTTPRequestHandler):
             from napcat_cli.lib.api import NapCatAPI
             api = NapCatAPI()
             base = self._compose_message("smart_text", payload)
+            msg = self._compose_reply(base, message_id)
+            r = api.call("send_msg", message_type="private", user_id=int(user_id) if user_id.isdigit() else user_id, message=msg)
+            return self._format_send_result(r)
         if action == "reply_private_text_raw":
             user_id = str(params.get("user_id", ""))
             message_id = str(params.get("message_id", ""))
@@ -1876,13 +1905,22 @@ class NapCatHandler(BaseHTTPRequestHandler):
 
         if action == "reply_private_file":
             user_id = str(params.get("user_id", ""))
+            message_id = str(params.get("message_id", ""))
             payload = self._resolve_payload(params, "path")
-            if not user_id or not payload:
-                return {"error": "user_id and payload (file path) are required", "expected_schema": ACTION_SCHEMAS.get("reply_private_file", {})}
+            if not user_id or not message_id or not payload:
+                return {"error": "user_id, message_id, and payload (file path) are required", "expected_schema": ACTION_SCHEMAS.get("reply_private_file", {})}
             try:
-                return self._upload_file("private", user_id, payload)
+                b64 = self._read_file_b64(payload)
             except ValueError as e:
                 return {"error": str(e)}
+            from napcat_cli.lib.api import NapCatAPI
+            api = NapCatAPI()
+            name = os.path.basename(payload)
+            msg = self._compose_reply([
+                {"type": "file", "data": {"file": f"base64://{b64}", "name": name}}
+            ], message_id)
+            r = api.call("send_msg", message_type="private", user_id=int(user_id) if user_id.isdigit() else user_id, message=msg)
+            return self._format_send_result(r)
 
         if action == "reply_private_cqcode":
             user_id = str(params.get("user_id", ""))
@@ -2311,7 +2349,7 @@ class NapCatHandler(BaseHTTPRequestHandler):
             result = api.call("get_image", url=image_url)
             if isinstance(result, dict) and "error" in result:
                 # Fallback: try direct download
-                import urllib.request, os
+                import urllib.request
                 try:
                     out = f"/tmp/napcat_img_{abs(hash(image_url))}.jpg"
                     urllib.request.urlretrieve(image_url, out)
@@ -2337,7 +2375,8 @@ class NapCatHandler(BaseHTTPRequestHandler):
         if action == "send_group_notice":
             from napcat_cli.lib.api import NapCatAPI
             api = NapCatAPI()
-            return api.call("_send_group_notice", **params)
+            return api.call("send_group_notice", **params)
+
         if action == "send_poke":
             from napcat_cli.lib.api import NapCatAPI
             api = NapCatAPI()
@@ -2372,6 +2411,17 @@ class NapCatHandler(BaseHTTPRequestHandler):
             api = NapCatAPI()
             return api.call("get_status")
 
+        # These public names document normalization to the common send_msg
+        # endpoint; don't let the generic prefix stripper call divergent APIs.
+        if action == "napcat_send_group_msg":
+            from napcat_cli.lib.api import NapCatAPI
+            api = NapCatAPI()
+            return api.call("send_msg", message_type="group", **params)
+        if action == "napcat_send_private_msg":
+            from napcat_cli.lib.api import NapCatAPI
+            api = NapCatAPI()
+            return api.call("send_msg", message_type="private", **params)
+
         # Proxy NapCat API calls through napcat_ prefix
         if action.startswith("napcat_"):
             from napcat_cli.lib.api import NapCatAPI
@@ -2389,23 +2439,26 @@ def run_http_server(
     port: int = 18820,
     host: str = "0.0.0.0",
     skillsfs_manager: SkillsFsManager | None = None,
-) -> HTTPServer:
+) -> ThreadingHTTPServer:
     """Start HTTP provider in a background thread. Returns the server."""
     NapCatHandler.processor = processor
     NapCatHandler.cache = cache
     NapCatHandler.events_reader = EventsReader(cache.data_dir)
     NapCatHandler.skillsfs_manager = skillsfs_manager
 
-    class _ReusableThreadingHTTPServer(HTTPServer):
-        """HTTPServer with larger backlog and per-request timeout.
+    class _ReusableThreadingHTTPServer(ThreadingHTTPServer):
+        """Concurrent HTTP server with bounded per-connection reads."""
 
-        Default backlog=1 makes the server trivially DoS-able via slow
-        connections. Bump it to 64 and set timeout so a single hanging
-        client cannot pin a worker forever, plus reuse to avoid TIME_WAIT.
-        """
         request_queue_size = 64
-        timeout = 30
         allow_reuse_address = True
+        daemon_threads = True
+        block_on_close = False
+        connection_timeout = 5.0
+
+        def get_request(self):
+            request, client_address = super().get_request()
+            request.settimeout(self.connection_timeout)
+            return request, client_address
 
     server = _ReusableThreadingHTTPServer((host, port), NapCatHandler)
     t = threading.Thread(target=server.serve_forever, daemon=True)

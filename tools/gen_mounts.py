@@ -24,9 +24,17 @@ def schema_json(action):
     return json.dumps(s)
 
 
-def make_api(path, read_action="", write_action="", mode="0644",
+def make_api(path, read_action="", write_action="", mode=None,
              write_params="json", provider="napcat", writeback=False):
-    """Build an API mount entry."""
+    """Build an API mount entry.
+
+    Side-effect-only actions must never be wired as reads: opening such a file
+    for reading would invoke the mutation with missing parameters.  When the
+    same action was supplied for both operations, keep only the write side.
+    Pure writes default to owner-write-only (0200); pure reads to 0444.
+    """
+    if write_action and read_action == write_action:
+        read_action = ""
     entry = {
         "path": path,
         "kind": "api",
@@ -36,14 +44,15 @@ def make_api(path, read_action="", write_action="", mode="0644",
         entry["read"] = read_action
     if write_action:
         entry["write"] = write_action
-        entry["mode"] = mode
+        entry["mode"] = mode or ("0600" if read_action else "0200")
         entry["writeParams"] = write_params
-    if not write_action:
-        entry["mode"] = "0444"
+    else:
+        entry["mode"] = mode or "0444"
     if writeback and write_action:
         entry["writeback"] = True
         entry["schema"] = schema_json(write_action)
     return entry
+
 
 
 def make_blob(path, data, mode="0444"):
@@ -80,15 +89,18 @@ def make_dynamic_dir(path, read_action, provider="napcat"):
 # Per-group operations (under groups/:group_id/)
 # ---------------------------------------------------------------------------
 GROUP_OPS = [
-    ("card", "set_group_card", "set_group_card"),
-    ("name", "set_group_name", "set_group_name"),
-    ("leave", "group_leave", "group_leave"),
+    ("kick", "", "set_group_kick"),
+    ("ban", "", "set_group_ban"),
+    ("admin", "", "set_group_admin"),
+    ("card", "", "set_group_card"),
+    ("name", "", "set_group_name"),
+    ("leave", "", "group_leave"),
     ("info", "napcat_get_group_info", ""),
     ("members", "napcat_get_group_member_list", ""),
     ("essence_list", "napcat_get_essence_list", ""),
-    ("poke", "send_poke", "send_poke"),
+    ("poke", "", "send_poke"),
     ("honor", "napcat_get_group_honor_list", ""),
-    ("announce", "send_group_notice", "send_group_notice"),
+    ("announce", "", "send_group_notice"),
 ]
 
 # ---------------------------------------------------------------------------
@@ -96,7 +108,7 @@ GROUP_OPS = [
 # ---------------------------------------------------------------------------
 FRIEND_OPS = [
     ("info", "napcat_get_stranger_info", ""),
-    ("remark", "set_friend_remark", "set_friend_remark"),
+    ("remark", "", "set_friend_remark"),
 ]
 
 # ---------------------------------------------------------------------------
@@ -307,7 +319,64 @@ def gen_mounts():
     for path, read_act in LEGACY_READ_ONLY:
         mounts.append(make_api(path, read_action=read_act, mode="0444"))
 
-    # AGENTS.md blobs (will be overwritten by Phase D; include stubs for now)
+    # Message-id-only operations. These were previously hand-appended to the
+    # generated config, so re-running this script silently deleted them.
+    mounts.append({
+        "path": "/napcat/messages", "kind": "dir", "mode": "0755",
+        "agents": False,
+    })
+    mounts.append(make_api(
+        "/napcat/messages/:message_id", read_action="get_message_by_mid",
+        mode="0444"))
+    by_mid_replies = [
+        ("text", "reply_by_mid_text", "raw", {
+            "params": ["message_id"],
+            "example": {"message_id": "987654321", "text": "reply [CQ:at,qq=123]"},
+            "required": ["message_id"],
+            "description": "Reply to any message by message_id only. Auto-recognises CQ codes. No group_id needed.",
+        }),
+        ("text_raw", "reply_by_mid_text_raw", "raw", {
+            "params": ["message_id"],
+            "example": {"message_id": "987654321", "text": "raw reply"},
+            "required": ["message_id"],
+            "description": "Reply by message_id only, raw plain text. CQ codes sent literally.",
+        }),
+        ("image", "reply_by_mid_image", "raw", {
+            "params": ["message_id"],
+            "example": {"message_id": "987654321", "path": "/tmp/image.png"},
+            "required": ["message_id"],
+            "description": "Reply with an image by message_id only.",
+        }),
+        ("cqcode", "reply_by_mid_cqcode", "raw", {
+            "params": ["message_id"],
+            "example": {"message_id": "987654321", "cqcode": "[CQ:face,id=123]"},
+            "required": ["message_id"],
+            "description": "Reply with CQ code string by message_id only.",
+        }),
+        ("at", "reply_by_mid_at", "json", {
+            "params": ["message_id", "qq"],
+            "example": {"message_id": "987654321", "qq": "456", "text": "hi"},
+            "required": ["message_id", "qq"],
+            "description": "Reply by @-ing someone, by message_id only.",
+        }),
+        ("json", "reply_by_mid_json", "json", {
+            "params": ["message_id", "message"],
+            "example": {"message_id": "987654321", "message": [{"type": "text", "data": {"text": "hi"}}]},
+            "required": ["message_id", "message"],
+            "description": "Reply with full message segments JSON, by message_id only.",
+        }),
+    ]
+    for name, action, write_params, schema in by_mid_replies:
+        entry = make_api(
+            f"/napcat/messages/:message_id/reply/{name}",
+            write_action=action, write_params=write_params, writeback=True)
+        entry["schema"] = json.dumps(schema)
+        mounts.append(entry)
+    mounts.append(make_api(
+        "/napcat/messages/:message_id/image",
+        read_action="get_image_by_mid", mode="0444"))
+
+    # AGENTS.md blobs (include stubs; richer prose is maintained separately).
     mounts.append(make_blob("/napcat/AGENTS.md", "# NapCat — see /napcat/AGENTS.md for full docs"))
     mounts.append(make_blob("/napcat/groups/AGENTS.md", "# Groups — see /napcat/groups/AGENTS.md for full docs"))
     mounts.append(make_blob("/napcat/groups/:group_id/AGENTS.md", "# Group — per-group operations"))
@@ -358,3 +427,7 @@ def main():
     canonical.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     print(f"Written: {canonical}")
     print("Tip: point ~/.napcat-data/skills-fs.json at this file via symlink.")
+
+
+if __name__ == "__main__":
+    main()

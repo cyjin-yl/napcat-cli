@@ -646,3 +646,243 @@ class TestHttpProviderEdgeCases:
         data = json.loads(body)
         entries = data.get("entries", data)
         assert isinstance(entries, list), f"Expected list: {entries}"
+
+
+class TestDispatchActionContracts:
+    """Agent-eval regressions for action routing and reply context."""
+
+    @staticmethod
+    def _handler(tmp_path):
+        from napcat_cli.daemon.watch import NapCatHandler
+        from unittest.mock import MagicMock
+
+        handler = NapCatHandler.__new__(NapCatHandler)
+        handler.processor = MagicMock()
+        handler.processor.writer.conn = MagicMock()
+        handler.cache = MagicMock()
+        handler.cache.data_dir = tmp_path
+        handler.events_reader = MagicMock()
+        return handler
+
+    def test_reply_group_file_keeps_message_id(self, tmp_path):
+        """reply_group_file sends a reply+file message, not a bare upload."""
+        from unittest.mock import patch
+
+        payload = tmp_path / "report.txt"
+        payload.write_bytes(b"payload")
+        handler = self._handler(tmp_path)
+        with patch("napcat_cli.lib.api.NapCatAPI.call", return_value={
+            "retcode": 0, "data": {"message_id": 9},
+        }) as call:
+            result = handler._dispatch("reply_group_file", {
+                "group_id": "123", "message_id": "456", "path": str(payload),
+            })
+
+        assert result == {"status": "ok", "message_id": 9}
+        action, = call.call_args.args
+        params = call.call_args.kwargs
+        assert action == "send_msg"
+        assert params["message_type"] == "group"
+        assert params["group_id"] == 123
+        assert params["message"][0] == {"type": "reply", "data": {"id": "456"}}
+        assert params["message"][1]["type"] == "file"
+        assert params["message"][1]["data"]["file"].startswith("base64://")
+
+    def test_reply_private_file_requires_message_id(self, tmp_path):
+        """reply_private_file rejects a bare upload with no reply target."""
+        payload = tmp_path / "report.txt"
+        payload.write_bytes(b"payload")
+        handler = self._handler(tmp_path)
+        result = handler._dispatch("reply_private_file", {
+            "user_id": "123", "path": str(payload),
+        })
+        assert "message_id" in result["error"]
+
+    def test_reply_private_file_keeps_message_id(self, tmp_path):
+        """reply_private_file sends a reply+file message."""
+        from unittest.mock import patch
+
+        payload = tmp_path / "report.txt"
+        payload.write_bytes(b"payload")
+        handler = self._handler(tmp_path)
+        with patch("napcat_cli.lib.api.NapCatAPI.call", return_value={
+            "retcode": 0, "data": {"message_id": 10},
+        }) as call:
+            result = handler._dispatch("reply_private_file", {
+                "user_id": "123", "message_id": "456", "path": str(payload),
+            })
+
+        assert result == {"status": "ok", "message_id": 10}
+        action, = call.call_args.args
+        params = call.call_args.kwargs
+        assert action == "send_msg"
+        assert params["message_type"] == "private"
+        assert params["user_id"] == 123
+        assert params["message"][0] == {"type": "reply", "data": {"id": "456"}}
+
+    def test_notice_uses_public_action_name(self, tmp_path):
+        """send_group_notice matches the CLI and documented NapCat API name."""
+        from unittest.mock import patch
+
+        handler = self._handler(tmp_path)
+        with patch("napcat_cli.lib.api.NapCatAPI.call", return_value={"retcode": 0}) as call:
+            handler._dispatch("send_group_notice", {"group_id": "123", "content": "hi"})
+        call.assert_called_once_with("send_group_notice", group_id="123", content="hi")
+
+    def test_group_send_proxy_normalizes_to_send_msg(self, tmp_path):
+        """napcat_send_group_msg follows its schema contract."""
+        from unittest.mock import patch
+
+        handler = self._handler(tmp_path)
+        with patch("napcat_cli.lib.api.NapCatAPI.call", return_value={"retcode": 0}) as call:
+            handler._dispatch("napcat_send_group_msg", {"group_id": "123", "message": "hi"})
+        call.assert_called_once_with(
+            "send_msg", message_type="group", group_id="123", message="hi")
+
+    def test_group_admin_actions_are_dispatched(self, tmp_path):
+        """Dynamic kick/ban/admin mounts all reach their OneBot API actions."""
+        from unittest.mock import patch
+
+        handler = self._handler(tmp_path)
+        cases = [
+            ("set_group_kick", {"group_id": "1", "user_id": "2"}),
+            ("set_group_ban", {"group_id": "1", "user_id": "2", "duration": 60}),
+            ("set_group_admin", {"group_id": "1", "user_id": "2", "enable": True}),
+        ]
+        for action, params in cases:
+            with patch("napcat_cli.lib.api.NapCatAPI.call", return_value={"retcode": 0}) as call:
+                handler._dispatch(action, params)
+            call.assert_called_once_with(action, **params)
+
+
+class TestMountGeneratorContracts:
+    """Generated skills-fs config cannot regress into phantom/unsafe mounts."""
+
+    def test_all_write_mounts_are_write_only(self):
+        from tools.gen_mounts import gen_mounts
+
+        for mount in gen_mounts():
+            if "write" not in mount:
+                continue
+            assert mount.get("mode") == "0200", mount
+            assert "read" not in mount, mount
+
+    def test_per_group_admin_mounts_exist(self):
+        from tools.gen_mounts import gen_mounts
+
+        mounts = {m["path"]: m for m in gen_mounts()}
+        expected = {
+            "kick": "set_group_kick",
+            "ban": "set_group_ban",
+            "admin": "set_group_admin",
+        }
+        for name, action in expected.items():
+            mount = mounts[f"/napcat/groups/:group_id/{name}"]
+            assert mount["write"] == action
+            assert mount["mode"] == "0200"
+            assert mount["schema"] != "{}"
+
+    def test_generator_preserves_message_id_mounts(self):
+        from tools.gen_mounts import gen_mounts
+
+        paths = {m["path"] for m in gen_mounts()}
+        assert "/napcat/messages/:message_id" in paths
+        assert "/napcat/messages/:message_id/reply/text" in paths
+        assert "/napcat/messages/:message_id/reply/json" in paths
+
+
+class TestHttpServerLifecycle:
+    """Regressions from isolated slow-client lifecycle stress."""
+
+    def test_truncated_body_returns_400(self, tmp_path):
+        """EOF before declared Content-Length is rejected, never dispatched."""
+        import socket
+        import threading
+        from http.server import ThreadingHTTPServer
+        from unittest.mock import MagicMock
+        from napcat_cli.daemon.watch import NapCatHandler
+
+        NapCatHandler.processor = MagicMock()
+        NapCatHandler.cache = MagicMock()
+        NapCatHandler.cache.data_dir = tmp_path
+        server = ThreadingHTTPServer(("127.0.0.1", 0), NapCatHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        sock = socket.create_connection(server.server_address, timeout=2)
+        sock.settimeout(2)
+        try:
+            body = b'{"action":"get_stats"}'
+            headers = (
+                f"POST /invoke HTTP/1.0\r\nHost: localhost\r\n"
+                f"Content-Length: {len(body) + 50}\r\n\r\n"
+            ).encode()
+            sock.sendall(headers + body)
+            sock.shutdown(socket.SHUT_WR)
+            response = b""
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                response += chunk
+            assert response.startswith(b"HTTP/1.0 400")
+            assert b"Truncated request body" in response
+        finally:
+            sock.close()
+            server.shutdown()
+            server.server_close()
+
+    def test_slow_client_does_not_block_parallel_request(self, tmp_path):
+        """run_http_server uses per-connection threads, not synchronous HTTPServer."""
+        import http.client
+        import socket
+        import time
+        from unittest.mock import MagicMock
+        from napcat_cli.daemon.watch import run_http_server
+
+        processor = MagicMock()
+        cache = MagicMock()
+        cache.data_dir = tmp_path
+        server = run_http_server(processor, cache, port=0, host="127.0.0.1")
+        slow = socket.create_connection(server.server_address, timeout=2)
+        try:
+            slow.sendall(
+                b"POST /invoke HTTP/1.0\r\nHost: localhost\r\n"
+                b"Content-Length: 1000\r\n\r\n{"
+            )
+            started = time.monotonic()
+            conn = http.client.HTTPConnection(
+                server.server_address[0], server.server_address[1], timeout=2)
+            conn.request("GET", "/invoke?action=list_groups")
+            response = conn.getresponse()
+            response.read()
+            elapsed = time.monotonic() - started
+            conn.close()
+            assert response.status == 200
+            assert elapsed < 1.0, f"parallel request blocked for {elapsed:.3f}s"
+        finally:
+            slow.close()
+            server.shutdown()
+            server.server_close()
+
+    def test_reply_private_text_dispatches(self, tmp_path):
+        """Smart-text private reply cannot fall through to Unknown action."""
+        from unittest.mock import MagicMock, patch
+        from napcat_cli.daemon.watch import NapCatHandler
+
+        handler = NapCatHandler.__new__(NapCatHandler)
+        handler.processor = MagicMock()
+        handler.cache = MagicMock()
+        handler.cache.data_dir = tmp_path
+        handler.events_reader = MagicMock()
+        with patch("napcat_cli.lib.api.NapCatAPI.call", return_value={
+            "retcode": 0, "data": {"message_id": 11},
+        }) as call:
+            result = handler._dispatch("reply_private_text", {
+                "user_id": "123", "message_id": "456", "text": "hello",
+            })
+        assert result == {"status": "ok", "message_id": 11}
+        action, = call.call_args.args
+        assert action == "send_msg"
+        assert call.call_args.kwargs["message"][0] == {
+            "type": "reply", "data": {"id": "456"},
+        }

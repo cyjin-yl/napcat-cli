@@ -181,3 +181,26 @@ class TestWaker:
         w = Waker([http, cli], primary="http")
         w.wake("p", "AT_ME", dry_run=True)
         assert http.calls == 1 and cli.calls == 0
+
+
+class _RaisingBackend(_FakeBackend):
+    def wake(self, prompt, reason, ctx, idem_key, *, dry_run=False, timeout=30.0):
+        self.calls += 1
+        raise RuntimeError("backend exploded")
+
+
+def test_waker_falls_back_after_backend_exception():
+    first = _RaisingBackend("http")
+    second = _FakeBackend("cli", ok=True, reply="recovered")
+    result = Waker([first, second], primary="auto").wake("p", "AT_ME")
+    assert result.ok is True
+    assert result.transport == "cli"
+    assert first.calls == 1 and second.calls == 1
+
+
+def test_cli_render_failure_is_wake_result():
+    backend = CliWakeBackend("echo {prompt_file}")
+    with patch.object(backend, "_render_file", side_effect=OSError("disk full")):
+        result = backend.wake("hi", "AT_ME", {}, "key")
+    assert result.ok is False
+    assert "disk full" in result.detail

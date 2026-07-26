@@ -55,12 +55,59 @@
       "provider": "napcat"
     },
     {
+      "path": "/napcat/groups/:group_id/kick",
+      "kind": "api",
+      "provider": "napcat",
+      "write": "set_group_kick",
+      "mode": "0200",
+      "writeParams": "json",
+      "writeback": true,
+      "schema": "{\"params\": [\"group_id\", \"user_id\", \"reject_add_request\"], \"example\": {\"group_id\": \"123456\", \"user_id\": \"12345678\"}, \"required\": [\"group_id\", \"user_id\"], \"description\": \"Kick a member from a group (OneBot action name).\"}"
+    },
+    {
+      "path": "/napcat/groups/:group_id/kick.schema",
+      "kind": "blob",
+      "mode": "0444",
+      "data": "{\"params\": [\"group_id\", \"user_id\", \"reject_add_request\"], \"example\": {\"group_id\": \"123456\", \"user_id\": \"12345678\"}, \"required\": [\"group_id\", \"user_id\"], \"description\": \"Kick a member from a group (OneBot action name).\"}"
+    },
+    {
+      "path": "/napcat/groups/:group_id/ban",
+      "kind": "api",
+      "provider": "napcat",
+      "write": "set_group_ban",
+      "mode": "0200",
+      "writeParams": "json",
+      "writeback": true,
+      "schema": "{\"params\": [\"group_id\", \"user_id\", \"duration\"], \"example\": {\"group_id\": \"123456\", \"user_id\": \"12345678\", \"duration\": 600}, \"required\": [\"group_id\", \"user_id\", \"duration\"], \"description\": \"Ban/unban a group member (OneBot action name).\"}"
+    },
+    {
+      "path": "/napcat/groups/:group_id/ban.schema",
+      "kind": "blob",
+      "mode": "0444",
+      "data": "{\"params\": [\"group_id\", \"user_id\", \"duration\"], \"example\": {\"group_id\": \"123456\", \"user_id\": \"12345678\", \"duration\": 600}, \"required\": [\"group_id\", \"user_id\", \"duration\"], \"description\": \"Ban/unban a group member (OneBot action name).\"}"
+    },
+    {
+      "path": "/napcat/groups/:group_id/admin",
+      "kind": "api",
+      "provider": "napcat",
+      "write": "set_group_admin",
+      "mode": "0200",
+      "writeParams": "json",
+      "writeback": true,
+      "schema": "{\"params\": [\"group_id\", \"user_id\", \"enable\"], \"example\": {\"group_id\": \"123456\", \"user_id\": \"12345678\", \"enable\": true}, \"required\": [\"group_id\", \"user_id\", \"enable\"], \"description\": \"Set/unset group admin (OneBot action name).\"}"
+    },
+    {
+      "path": "/napcat/groups/:group_id/admin.schema",
+      "kind": "blob",
+      "mode": "0444",
+      "data": "{\"params\": [\"group_id\", \"user_id\", \"enable\"], \"example\": {\"group_id\": \"123456\", \"user_id\": \"12345678\", \"enable\": true}, \"required\": [\"group_id\", \"user_id\", \"enable\"], \"description\": \"Set/unset group admin (OneBot action name).\"}"
+    },
+    {
       "path": "/napcat/groups/:group_id/card",
       "kind": "api",
       "provider": "napcat",
-      "read": "set_group_card",
       "write": "set_group_card",
-      "mode": "0644",
+      "mode": "0200",
       "writeParams": "json",
       "writeback": true,
       "schema": "{\"params\": [\"group_id\", \"user_id\", \"card\"], \"example\": {\"group_id\": \"123456\", \"user_id\": \"12345678\", \"card\": \"Nickname\"}, \"required\": [\"group_id\", \"user_id\", \"card\"], \"description\": \"Set a member's group card (OneBot action name).\"}"
@@ -75,9 +122,8 @@
       "path": "/napcat/groups/:group_id/name",
       "kind": "api",
       "provider": "napcat",
-      "read": "set_group_name",
       "write": "set_group_name",
-      "mode": "0644",
+      "mode": "0200",
       "writeParams": "json",
       "writeback": true,
       "schema": "{\"params\": [\"group_id\", \"group_name\"], \"example\": {\"group_id\": \"123456\", \"group_name\": \"New Group Name\"}, \"required\": [\"group_id\", \"group_name\"], \"description\": \"Set group name (OneBot action name).\"}"
@@ -92,9 +138,8 @@
       "path": "/napcat/groups/:group_id/leave",
       "kind": "api",
       "provider": "napcat",
-      "read": "group_leave",
       "write": "group_leave",
-      "mode": "0644",
+      "mode": "0200",
       "writeParams": "json",
       "writeback": true,
       "schema": "{\"params\": [\"group_id\", \"reject\"], \"example\": {\"group_id\": \"123456\"}, \"required\": [\"group_id\"], \"description\": \"Leave a group (OneBot action name).\"}"
@@ -130,9 +175,8 @@
       "path": "/napcat/groups/:group_id/poke",
       "kind": "api",
       "provider": "napcat",
-      "read": "send_poke",
       "write": "send_poke",
-      "mode": "0644",
+      "mode": "0200",
       "writeParams": "json",
       "writeback": true,
       "schema": "{\"params\": [\"group_id\", \"user_id\"], \"example\": {\"group_id\": \"123456\", \"user_id\": \"12345678\"}, \"required\": [\"group_id\", \"user_id\"], \"description\": \"Poke a group member (OneBot action name).\"}"
@@ -154,9 +198,8 @@
       "path": "/napcat/groups/:group_id/announce",
       "kind": "api",
       "provider": "napcat",
-      "read": "send_group_notice",
       "write": "send_group_notice",
-      "mode": "0644",
+      "mode": "0200",
       "writeParams": "json",
       "writeback": true,
       "schema": "{\"params\": [\"group_id\", \"title\", \"content\", \"hints\"], \"example\": {\"group_id\": \"123456\", \"title\": \"Notice\", \"content\": \"Hello everyone\"}, \"required\": [\"group_id\", \"content\"], \"description\": \"Send a group notice/announcement (OneBot action name).\"}"
@@ -434,9 +477,8 @@
       "path": "/napcat/friends/:user_id/remark",
       "kind": "api",
       "provider": "napcat",
-      "read": "set_friend_remark",
       "write": "set_friend_remark",
-      "mode": "0644",
+      "mode": "0200",
       "writeParams": "json",
       "writeback": true,
       "schema": "{\"params\": [\"user_id\", \"remark\"], \"example\": {\"user_id\": \"12345678\", \"remark\": \"Friend Remark\"}, \"required\": [\"user_id\", \"remark\"], \"description\": \"Set a friend's remark (OneBot action name).\"}"
@@ -689,9 +731,8 @@
       "path": "/napcat/send_group",
       "kind": "api",
       "provider": "napcat",
-      "read": "napcat_send_group_msg",
       "write": "napcat_send_group_msg",
-      "mode": "0644",
+      "mode": "0200",
       "writeParams": "json",
       "writeback": true,
       "schema": "{\"params\": [\"group_id\", \"message\"], \"example\": {\"group_id\": \"123456\", \"message\": \"hello\"}, \"required\": [\"group_id\", \"message\"], \"description\": \"Send a group message (proxied to send_msg with message_type=group).\"}"
@@ -706,9 +747,8 @@
       "path": "/napcat/send_private",
       "kind": "api",
       "provider": "napcat",
-      "read": "napcat_send_private_msg",
       "write": "napcat_send_private_msg",
-      "mode": "0644",
+      "mode": "0200",
       "writeParams": "json",
       "writeback": true,
       "schema": "{\"params\": [\"user_id\", \"message\"], \"example\": {\"user_id\": \"12345678\", \"message\": \"hello\"}, \"required\": [\"user_id\", \"message\"], \"description\": \"Send a private message (proxied to send_msg with message_type=private).\"}"
@@ -723,9 +763,8 @@
       "path": "/napcat/delete",
       "kind": "api",
       "provider": "napcat",
-      "read": "napcat_delete_msg",
       "write": "napcat_delete_msg",
-      "mode": "0644",
+      "mode": "0200",
       "writeParams": "json",
       "writeback": true,
       "schema": "{\"params\": [\"message_id\"], \"example\": {\"message_id\": \"987654321\"}, \"required\": [\"message_id\"], \"description\": \"Delete/recall a sent message. Rules: bot recalling its own message must act within 2 minutes. Admin can recall any member message with no time limit. Group owner can recall any message with no time limit.\"}"
@@ -740,9 +779,8 @@
       "path": "/napcat/clear_alert",
       "kind": "api",
       "provider": "napcat",
-      "read": "clear_alert",
       "write": "clear_alert",
-      "mode": "0644",
+      "mode": "0200",
       "writeParams": "json",
       "writeback": true,
       "schema": "{\"params\": [\"name\"], \"example\": {\"name\": \"NEW_MESSAGE\"}, \"required\": [\"name\"], \"description\": \"Clear alerts of a specific name.\"}"
@@ -757,9 +795,8 @@
       "path": "/napcat/clear_all_alerts",
       "kind": "api",
       "provider": "napcat",
-      "read": "clear_all_alerts",
       "write": "clear_all_alerts",
-      "mode": "0644",
+      "mode": "0200",
       "writeParams": "json",
       "writeback": true,
       "schema": "{\"params\": [], \"example\": {}, \"required\": [], \"description\": \"Clear all pending alerts.\"}"
@@ -774,9 +811,8 @@
       "path": "/napcat/group_kick",
       "kind": "api",
       "provider": "napcat",
-      "read": "napcat_set_group_kick",
       "write": "napcat_set_group_kick",
-      "mode": "0644",
+      "mode": "0200",
       "writeParams": "json",
       "writeback": true,
       "schema": "{\"params\": [\"group_id\", \"user_id\", \"reject_add_request\"], \"example\": {\"group_id\": \"123456\", \"user_id\": \"12345678\"}, \"required\": [\"group_id\", \"user_id\"], \"description\": \"Kick a member from a group. Set reject_add_request to prevent rejoining.\"}"
@@ -791,9 +827,8 @@
       "path": "/napcat/group_ban",
       "kind": "api",
       "provider": "napcat",
-      "read": "napcat_set_group_ban",
       "write": "napcat_set_group_ban",
-      "mode": "0644",
+      "mode": "0200",
       "writeParams": "json",
       "writeback": true,
       "schema": "{\"params\": [\"group_id\", \"user_id\", \"duration\"], \"example\": {\"group_id\": \"123456\", \"user_id\": \"12345678\", \"duration\": 600}, \"required\": [\"group_id\", \"user_id\", \"duration\"], \"description\": \"Ban a group member. Duration is in seconds; 0 means unban.\"}"
@@ -808,9 +843,8 @@
       "path": "/napcat/group_essence",
       "kind": "api",
       "provider": "napcat",
-      "read": "napcat_set_essence",
       "write": "napcat_set_essence",
-      "mode": "0644",
+      "mode": "0200",
       "writeParams": "json",
       "writeback": true,
       "schema": "{\"params\": [\"group_id\", \"message_id\"], \"example\": {\"group_id\": \"123456\", \"message_id\": \"987654321\"}, \"required\": [\"group_id\", \"message_id\"], \"description\": \"Set or unset a message as group essence message.\"}"
@@ -825,9 +859,8 @@
       "path": "/napcat/group_sign",
       "kind": "api",
       "provider": "napcat",
-      "read": "napcat_group_sign",
       "write": "napcat_group_sign",
-      "mode": "0644",
+      "mode": "0200",
       "writeParams": "json",
       "writeback": true,
       "schema": "{\"params\": [\"group_id\"], \"example\": {\"group_id\": \"123456\"}, \"required\": [\"group_id\"], \"description\": \"Sign in to a group (daily check-in).\"}"
@@ -842,9 +875,8 @@
       "path": "/napcat/group_admin",
       "kind": "api",
       "provider": "napcat",
-      "read": "napcat_set_group_admin",
       "write": "napcat_set_group_admin",
-      "mode": "0644",
+      "mode": "0200",
       "writeParams": "json",
       "writeback": true,
       "schema": "{\"params\": [\"group_id\", \"user_id\", \"enable\"], \"example\": {\"group_id\": \"123456\", \"user_id\": \"12345678\", \"enable\": true}, \"required\": [\"group_id\", \"user_id\", \"enable\"], \"description\": \"Set or unset group admin for a member.\"}"
@@ -859,9 +891,8 @@
       "path": "/napcat/group_owner",
       "kind": "api",
       "provider": "napcat",
-      "read": "napcat_set_group_entire_title",
       "write": "napcat_set_group_entire_title",
-      "mode": "0644",
+      "mode": "0200",
       "writeParams": "json",
       "writeback": true,
       "schema": "{\"params\": [\"group_id\", \"title\"], \"example\": {\"group_id\": \"123456\", \"title\": \"My Group Title\"}, \"required\": [\"group_id\", \"title\"], \"description\": \"Set the group owner's special title for the entire group.\"}"
@@ -876,9 +907,8 @@
       "path": "/napcat/group_name",
       "kind": "api",
       "provider": "napcat",
-      "read": "napcat_set_group_name",
       "write": "napcat_set_group_name",
-      "mode": "0644",
+      "mode": "0200",
       "writeParams": "json",
       "writeback": true,
       "schema": "{\"params\": [\"group_id\", \"group_name\"], \"example\": {\"group_id\": \"123456\", \"group_name\": \"New Group Name\"}, \"required\": [\"group_id\", \"group_name\"], \"description\": \"Set the group name.\"}"
@@ -893,9 +923,8 @@
       "path": "/napcat/group_confess",
       "kind": "api",
       "provider": "napcat",
-      "read": "napcat_set_group_portrait",
       "write": "napcat_set_group_portrait",
-      "mode": "0644",
+      "mode": "0200",
       "writeParams": "json",
       "writeback": true,
       "schema": "{\"params\": [\"group_id\", \"file\"], \"example\": {\"group_id\": \"123456\", \"file\": \"file:///path/to/image.png\"}, \"required\": [\"group_id\", \"file\"], \"description\": \"Set the group portrait/avatar. File can be a local path (file:///), URL, or base64.\"}"
@@ -910,9 +939,8 @@
       "path": "/napcat/group_create",
       "kind": "api",
       "provider": "napcat",
-      "read": "napcat_create_group",
       "write": "napcat_create_group",
-      "mode": "0644",
+      "mode": "0200",
       "writeParams": "json",
       "writeback": true,
       "schema": "{\"params\": [\"group_name\", \"member_ids\"], \"example\": {\"group_name\": \"My Group\", \"member_ids\": [12345678, 87654321]}, \"required\": [\"group_name\"], \"description\": \"Create a new QQ group. Optionally invite members via member_ids.\"}"
@@ -927,9 +955,8 @@
       "path": "/napcat/group_leave",
       "kind": "api",
       "provider": "napcat",
-      "read": "napcat_group_leave",
       "write": "napcat_group_leave",
-      "mode": "0644",
+      "mode": "0200",
       "writeParams": "json",
       "writeback": true,
       "schema": "{\"params\": [\"group_id\", \"reject\"], \"example\": {\"group_id\": \"123456\"}, \"required\": [\"group_id\"], \"description\": \"Leave a group. Set reject to block future join requests.\"}"
@@ -944,9 +971,8 @@
       "path": "/napcat/group_liking",
       "kind": "api",
       "provider": "napcat",
-      "read": "napcat_send_like",
       "write": "napcat_send_like",
-      "mode": "0644",
+      "mode": "0200",
       "writeParams": "json",
       "writeback": true,
       "schema": "{\"params\": [\"user_id\", \"times\"], \"example\": {\"user_id\": \"12345678\", \"times\": 1}, \"required\": [\"user_id\"], \"description\": \"Send like(s) to a user. Times defaults to 1, max 10 per call.\"}"
@@ -961,9 +987,8 @@
       "path": "/napcat/group_forward",
       "kind": "api",
       "provider": "napcat",
-      "read": "napcat_forward_msg",
       "write": "napcat_forward_msg",
-      "mode": "0644",
+      "mode": "0200",
       "writeParams": "json",
       "writeback": true,
       "schema": "{\"params\": [\"group_id\", \"message_id\"], \"example\": {\"group_id\": \"123456\", \"message_id\": \"987654321\"}, \"required\": [\"group_id\", \"message_id\"], \"description\": \"Forward a message to another group.\"}"
@@ -978,9 +1003,8 @@
       "path": "/napcat/friend_add",
       "kind": "api",
       "provider": "napcat",
-      "read": "napcat_send_friend_request",
       "write": "napcat_send_friend_request",
-      "mode": "0644",
+      "mode": "0200",
       "writeParams": "json",
       "writeback": true,
       "schema": "{\"params\": [\"user_id\", \"remark\"], \"example\": {\"user_id\": \"12345678\", \"remark\": \"Hey there\"}, \"required\": [\"user_id\"], \"description\": \"Send a friend request to a user. Remark is optional.\"}"
@@ -995,9 +1019,8 @@
       "path": "/napcat/get_image",
       "kind": "api",
       "provider": "napcat",
-      "read": "napcat_get_image",
       "write": "napcat_get_image",
-      "mode": "0644",
+      "mode": "0200",
       "writeParams": "json",
       "writeback": true,
       "schema": "{\"params\": [\"url\"], \"example\": {\"url\": \"https://example.com/image.png\"}, \"required\": [\"url\"], \"description\": \"Download an image by URL.\"}"
@@ -1012,9 +1035,8 @@
       "path": "/napcat/ocr",
       "kind": "api",
       "provider": "napcat",
-      "read": "napcat_ocr",
       "write": "napcat_ocr",
-      "mode": "0644",
+      "mode": "0200",
       "writeParams": "json",
       "writeback": true,
       "schema": "{\"params\": [\"image\"], \"example\": {\"image\": \"file:///path/to/image.png\"}, \"required\": [\"image\"], \"description\": \"Perform OCR on an image. Image can be a file path, URL, or base64.\"}"
@@ -1029,9 +1051,8 @@
       "path": "/napcat/goon",
       "kind": "api",
       "provider": "napcat",
-      "read": "napcat_goon",
       "write": "napcat_goon",
-      "mode": "0644",
+      "mode": "0200",
       "writeParams": "json",
       "writeback": true,
       "schema": "{\"params\": [], \"example\": {}, \"required\": [], \"description\": \"Continue/resume a pending task (NapCat-specific).\"}"
@@ -1046,9 +1067,8 @@
       "path": "/napcat/approve_request",
       "kind": "api",
       "provider": "napcat",
-      "read": "napcat_approve_request",
       "write": "napcat_approve_request",
-      "mode": "0644",
+      "mode": "0200",
       "writeParams": "json",
       "writeback": true,
       "schema": "{\"params\": [\"request_id\", \"request_type\"], \"example\": {\"request_id\": \"111111111\", \"request_type\": \"group\"}, \"required\": [\"request_id\", \"request_type\"], \"description\": \"Approve an incoming request. request_type: \\\"group\\\" or \\\"friend\\\".\"}"
@@ -1063,9 +1083,8 @@
       "path": "/napcat/reject_request",
       "kind": "api",
       "provider": "napcat",
-      "read": "napcat_reject_request",
       "write": "napcat_reject_request",
-      "mode": "0644",
+      "mode": "0200",
       "writeParams": "json",
       "writeback": true,
       "schema": "{\"params\": [\"request_id\", \"request_type\"], \"example\": {\"request_id\": \"111111111\", \"request_type\": \"group\"}, \"required\": [\"request_id\", \"request_type\"], \"description\": \"Reject an incoming request. request_type: \\\"group\\\" or \\\"friend\\\".\"}"
@@ -1168,48 +1187,6 @@
       "mode": "0444"
     },
     {
-      "path": "/napcat/AGENTS.md",
-      "kind": "blob",
-      "mode": "0444",
-      "data": "# NapCat — see /napcat/AGENTS.md for full docs"
-    },
-    {
-      "path": "/napcat/groups/AGENTS.md",
-      "kind": "blob",
-      "mode": "0444",
-      "data": "# Groups — see /napcat/groups/AGENTS.md for full docs"
-    },
-    {
-      "path": "/napcat/groups/:group_id/AGENTS.md",
-      "kind": "blob",
-      "mode": "0444",
-      "data": "# Group — per-group operations"
-    },
-    {
-      "path": "/napcat/groups/:group_id/:time_range/AGENTS.md",
-      "kind": "blob",
-      "mode": "0444",
-      "data": "# Time Range — lists messages"
-    },
-    {
-      "path": "/napcat/friends/AGENTS.md",
-      "kind": "blob",
-      "mode": "0444",
-      "data": "# Friends — per-friend operations"
-    },
-    {
-      "path": "/napcat/friends/:user_id/AGENTS.md",
-      "kind": "blob",
-      "mode": "0444",
-      "data": "# Friend — per-friend operations"
-    },
-    {
-      "path": "/napcat/friends/:user_id/:time_range/AGENTS.md",
-      "kind": "blob",
-      "mode": "0444",
-      "data": "# Time Range — lists messages"
-    },
-    {
       "path": "/napcat/messages",
       "kind": "dir",
       "mode": "0755",
@@ -1288,6 +1265,48 @@
       "provider": "napcat",
       "read": "get_image_by_mid",
       "mode": "0444"
+    },
+    {
+      "path": "/napcat/AGENTS.md",
+      "kind": "blob",
+      "mode": "0444",
+      "data": "# NapCat — see /napcat/AGENTS.md for full docs"
+    },
+    {
+      "path": "/napcat/groups/AGENTS.md",
+      "kind": "blob",
+      "mode": "0444",
+      "data": "# Groups — see /napcat/groups/AGENTS.md for full docs"
+    },
+    {
+      "path": "/napcat/groups/:group_id/AGENTS.md",
+      "kind": "blob",
+      "mode": "0444",
+      "data": "# Group — per-group operations"
+    },
+    {
+      "path": "/napcat/groups/:group_id/:time_range/AGENTS.md",
+      "kind": "blob",
+      "mode": "0444",
+      "data": "# Time Range — lists messages"
+    },
+    {
+      "path": "/napcat/friends/AGENTS.md",
+      "kind": "blob",
+      "mode": "0444",
+      "data": "# Friends — per-friend operations"
+    },
+    {
+      "path": "/napcat/friends/:user_id/AGENTS.md",
+      "kind": "blob",
+      "mode": "0444",
+      "data": "# Friend — per-friend operations"
+    },
+    {
+      "path": "/napcat/friends/:user_id/:time_range/AGENTS.md",
+      "kind": "blob",
+      "mode": "0444",
+      "data": "# Time Range — lists messages"
     }
   ],
   "providers": [

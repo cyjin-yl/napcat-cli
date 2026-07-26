@@ -314,11 +314,11 @@ class CliWakeBackend(WakeBackend):
     def wake(self, prompt, reason, ctx, idem_key, *, dry_run=False, timeout=30.0) -> WakeResult:
         if not self.configured():
             return WakeResult(False, "cli", "not configured (command_template required)")
-        cmd = self._render_file(prompt, reason) if not dry_run else self.render(prompt, reason)
-        if dry_run:
-            return WakeResult(True, "cli", f"[dry-run] {cmd}")
         start = time.monotonic()
         try:
+            cmd = self._render_file(prompt, reason) if not dry_run else self.render(prompt, reason)
+            if dry_run:
+                return WakeResult(True, "cli", f"[dry-run] {cmd}")
             r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
             ok = r.returncode == 0
             detail = f"exit={r.returncode}"
@@ -374,7 +374,10 @@ class Waker:
             return WakeResult(False, "none", "no wake backend configured (run `napcat setup`)")
         attempts: list[str] = []
         for b in self.backends:
-            res = b.wake(prompt, reason, ctx, idem_key, dry_run=dry_run, timeout=timeout)
+            try:
+                res = b.wake(prompt, reason, ctx, idem_key, dry_run=dry_run, timeout=timeout)
+            except Exception as e:
+                res = WakeResult(False, b.name, f"failed: {e}")
             attempts.append(f"{b.name}: {res.detail}")
             if dry_run:
                 return res  # render only the first (primary) backend
