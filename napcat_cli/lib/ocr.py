@@ -129,6 +129,76 @@ def get_ocr_instance() -> Optional[Any]:
         return None
 
 
+
+def _download_image(url: str) -> str:
+    """Download an image URL to a temp file, handling QQ anti-leech (防盗链).
+
+    QQ multimedia URLs reject plain ``urllib.urlretrieve`` — they return a tiny
+    HTML error page instead of the image. We send browser-like headers to get
+    the real bytes. If direct download fails, we fall back to NapCat's
+    ``get_image`` API (which downloads from inside the authenticated session).
+
+    Returns the temp file path, or "" on failure.
+    """
+    import tempfile
+    import urllib.request
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/107.0.5304.141 Mobile Safari/537.36 V1_AND_SQ_8.9.63",
+        "Referer": "https://user.qzone.qq.com",
+        "Accept": "image/*,*/*;q=0.8",
+    }
+
+    # Attempt 1: direct download with browser headers
+    try:
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = resp.read()
+        if data and len(data) > 100:  # real image, not error HTML
+            suffix = ".png"
+            ct = resp.headers.get("Content-Type", "")
+            if "jpeg" in ct or "jpg" in ct:
+                suffix = ".jpg"
+            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+                tmp.write(data)
+                return tmp.name
+        else:
+            logger.warning(f"OCR download too small ({len(data)} bytes) — likely anti-leech block")
+    except Exception as e:
+        logger.warning(f"OCR direct download failed: {e}")
+
+    # Attempt 2: NapCat get_image API (authenticated, bypasses anti-leech)
+    try:
+        from napcat_cli.lib.api import NapCatAPI
+        api = NapCatAPI()
+        result = api.call("get_image", file=url)
+        if result.get("retcode") == 0:
+            data = result.get("data") or {}
+            # NapCat may return a container-local path (useless on host)
+            # or a fresh URL; try downloading the fresh URL with headers
+            fresh_url = data.get("url") or ""
+            if fresh_url and fresh_url != url:
+                req2 = urllib.request.Request(fresh_url, headers=headers)
+                with urllib.request.urlopen(req2, timeout=15) as resp:
+                    data_bytes = resp.read()
+                if data_bytes and len(data_bytes) > 100:
+                    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+                        tmp.write(data_bytes)
+                        return tmp.name
+            # If NapCat returned base64 data, write it
+            b64 = data.get("base64") or data.get("data") or ""
+            if isinstance(b64, str) and b64:
+                import base64
+                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+                    tmp.write(base64.b64decode(b64))
+                    return tmp.name
+    except Exception as e:
+        logger.warning(f"OCR NapCat get_image fallback failed: {e}")
+
+    return ""
+
+
 def ocr_image(image_path: str) -> list[dict[str, Any]]:
     """Perform OCR on an image file.
     
@@ -145,14 +215,15 @@ def ocr_image(image_path: str) -> list[dict[str, Any]]:
         return []
     
     try:
-        # Handle URLs by downloading first
+        # Handle URLs by downloading first.
+        # QQ multimedia URLs have anti-leech (防盗链): plain urlretrieve gets
+        # a tiny HTML error page, not the image. We must send browser-like
+        # headers (User-Agent + Referer) to get the real bytes.
         if image_path.startswith(('http://', 'https://')):
-            import tempfile
-            import urllib.request
-            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
-                import urllib.request
-                urllib.request.urlretrieve(image_path, tmp.name)
-                image_path = tmp.name
+            image_path = _download_image(image_path)
+            if not image_path:
+                logger.error(f"OCR: could not download image (anti-leech or network)")
+                return []
         
         result = ocr.predict(image_path)
         return parse_ocr_result(result)

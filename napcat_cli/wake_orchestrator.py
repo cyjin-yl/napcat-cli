@@ -131,10 +131,11 @@ def _extract_image_meta(event: dict) -> str:
                 details.append(f"file_id: {file_id}")
             if url:
                 details.append(f"url: {url}")
-            if sub_type:
-                details.append(f"sub_type: {sub_type}")
+            if sub_type != "" and sub_type is not None:
+                # OneBot image sub_type: 0 normal, 1 face/sticker, etc.
+                details.append(f"sub_type(图片类型0普通/1表情等)={sub_type}")
             if file_size:
-                details.append(f"size: {file_size}")
+                details.append(f"file_size(字节)={file_size}")
 
             if details:
                 parts.append("[图片: " + ", ".join(details) + "]")
@@ -320,23 +321,44 @@ def build_prompt(reason: str, events: list[dict]) -> str:
 
 
     if reason == "NEW_MESSAGE_BACKLOG":
+        from napcat_cli.lib.identity import IDENTITY_LEGEND
         return (
+            f"{IDENTITY_LEGEND}\n"
             f"【QQ 未读积压】有约 {n} 条未读新消息积压了一段时间，请扫一眼收件箱；"
             f"仅在需要时回复，可以不接。\n{_OPTIONAL_REPLY_POLICY}\n{_PROMPT_FOOTER}"
         )
 
     if reason in ("NEW_MESSAGE", "GROUP_TRIGGER", "PRIVATE_TRIGGER"):
-        text = _event_text(events[-1]) if events else ""
+        from napcat_cli.lib.identity import IDENTITY_LEGEND
+        e = events[-1] if events else {}
+        text = _event_text(e) if e else ""
+        mid = str(e.get("message_id") or "")
+        uid = str((e.get("sender") or {}).get("user_id") if isinstance(e.get("sender"), dict) else e.get("user_id") or "")
+        gid = str(e.get("group_id") or "")
+        id_bits = []
+        if mid:
+            id_bits.append(f"触发消息ID(message_id)={mid}")
+        if uid:
+            id_bits.append(f"对方QQ号(user_id)={uid}")
+        if gid:
+            id_bits.append(f"群号(group_id)={gid}")
+        id_line = ("\n[关键ID] " + "; ".join(id_bits)) if id_bits else ""
         return (
-            f"【QQ 新消息】收到 {n} 条新消息。最近：{_where(events[-1]) if events else ''} "
-            f"{_who(events[-1]) if events else ''}：{text}\n"
+            f"{IDENTITY_LEGEND}\n"
+            f"【QQ 新消息/{reason}】收到 {n} 条。最近：{_where(e) if e else ''} "
+            f"{_who(e) if e else ''}：{text}{id_line}\n"
             f"{_OPTIONAL_REPLY_POLICY}\n{_PROMPT_FOOTER}"
         )
 
     if reason == "NEW_FRIEND":
-        ids = sorted({str(e.get("user_id", "")) for e in events if e.get("user_id")})
+        people = []
+        for e in events:
+            uid = e.get("user_id")
+            if uid:
+                people.append(f"{_who({'user_id': uid, 'sender': e.get('sender') or {'user_id': uid}})} [user_id={uid}]")
         return (
-            f"【QQ 新好友】新增好友 {n} 个：{', '.join(ids)}。可酌情打招呼或忽略。"
+            f"【QQ 新好友】新增好友 {n} 个：{'; '.join(people) or '(无明细)'}。"
+            f"可酌情用 `napcat send private <user_id> --message` 打招呼，或忽略。"
             f"\n{_OPTIONAL_REPLY_POLICY}\n{_PROMPT_FOOTER}"
         )
 
@@ -346,37 +368,83 @@ def build_prompt(reason: str, events: list[dict]) -> str:
             rt = e.get("request_type", "?")
             sub = e.get("sub_type", "")
             comment = str(e.get("comment", ""))[:40]
-            reqs.append(f"{rt}/{sub} from {e.get('user_id','?')}" + (f"「{comment}」" if comment else ""))
+            uid = e.get("user_id", "")
+            who = _who({"user_id": uid, "group_id": e.get("group_id"), "sender": e.get("sender") or {"user_id": uid}})
+            flag = e.get("flag", "")
+            bit = f"类型={rt}/{sub or '-'} 申请人={who} [user_id={uid}]"
+            if e.get("group_id"):
+                bit += f" 目标群={_where(e)} [group_id={e.get('group_id')}]"
+            if flag:
+                bit += f" flag(审批用凭证)={flag}"
+            if comment:
+                bit += f" 验证信息「{comment}」"
+            reqs.append(bit)
         return (
-            f"【QQ 请求】收到 {n} 个加好友/加群请求：{'; '.join(reqs)}。"
-            f"请决定是否同意（用 napcat api set_friend_add_request/set_group_add_request）。"
+            f"【QQ 请求】收到 {n} 个加好友/加群请求：{' || '.join(reqs)}。"
+            f"同意/拒绝用 napcat api set_friend_add_request / set_group_add_request（需要上面的 flag）。"
             f"\n{_OPTIONAL_REPLY_POLICY}\n{_PROMPT_FOOTER}"
         )
 
     if reason == "BOT_BANNED":
         e = events[-1] if events else {}
+        op = e.get("operator_id") or e.get("user_id")
+        dur = e.get("duration", "?")
         return (
-            f"【QQ 被禁言】你在{_where(e)}被禁言，操作者 {_who({**e, 'user_id': e.get('operator_id'), 'sender': {'user_id': e.get('operator_id')}})}，"
-            f"时长 {e.get('duration','?')}s。请知悉。\n{_OPTIONAL_REPLY_POLICY}"
+            f"【QQ 被禁言】你在群 {_where(e)} [group_id={e.get('group_id','')}] 被禁言；"
+            f"操作者 {_who({'user_id': op, 'group_id': e.get('group_id'), 'sender': {'user_id': op}})} [operator_id/user_id={op}]；"
+            f"时长 duration={dur} 秒。请知悉（通常无需回复）。\n{_OPTIONAL_REPLY_POLICY}"
         )
 
     if reason == "BOT_KICKED_FROM_GROUP":
-        return f"【QQ 被踢出群】你被踢出/移除了 {n} 个群。请知悉。\n{_OPTIONAL_REPLY_POLICY}"
+        places = []
+        for e in events:
+            places.append(f"{_where(e)} [group_id={e.get('group_id','')}] 操作者user_id={e.get('operator_id','?')}")
+        return (
+            f"【QQ 被踢出群】你被踢出/移除了 {n} 个群：{'; '.join(places) or '(无明细)'}。请知悉。\n{_OPTIONAL_REPLY_POLICY}"
+        )
 
     if reason == "GROUP_ADMIN_CHANGE":
-        return f"【QQ 管理员变动】你的群管理员权限发生变动。请知悉。\n{_OPTIONAL_REPLY_POLICY}"
+        bits = []
+        for e in events:
+            bits.append(
+                f"{_where(e)} [group_id={e.get('group_id','')}] "
+                f"对象={_who({'user_id': e.get('user_id'), 'group_id': e.get('group_id'), 'sender': {'user_id': e.get('user_id')}})} "
+                f"[user_id={e.get('user_id','')}] sub_type={e.get('sub_type','?')}"
+            )
+        return (
+            f"【QQ 管理员变动】{'; '.join(bits) or '你的群管理员权限发生变动'}。请知悉。\n{_OPTIONAL_REPLY_POLICY}"
+        )
 
     if reason in ("NEW_POKE", "PROFILE_LIKE"):
         e = events[-1] if events else {}
+        src = e.get("sender_id") or e.get("operator_id") or e.get("user_id")
+        who = _who({
+            "user_id": src,
+            "group_id": e.get("group_id"),
+            "sender": e.get("sender") if isinstance(e.get("sender"), dict) else {"user_id": src},
+        })
+        where = _where(e)
+        extra = f" times(点赞次数)={e.get('times')}" if e.get("times") is not None else ""
         return (
-            f"【QQ 戳一戳】{_who({**e, 'user_id': e.get('sender_id') or e.get('operator_id') or e.get('user_id'), 'sender': e.get('sender') or {'user_id': e.get('sender_id') or e.get('operator_id')}})} 戳了你/赞了你 {n} 次。"
+            f"【QQ {'资料卡点赞' if reason=='PROFILE_LIKE' else '戳一戳'}】"
+            f"{who} [user_id={src}] 在 {where}"
+            + (f" [group_id={e.get('group_id')}]" if e.get("group_id") else "")
+            + f" 戳了你/赞了你 共 {n} 次事件{extra}。"
             f"可酌情互动，可以不接。\n{_OPTIONAL_REPLY_POLICY}"
         )
 
     if reason == "NEW_GROUP_MEMBER":
-        ids = sorted({str(e.get("user_id", "")) for e in events if e.get("user_id")})
+        bits = []
+        for e in events:
+            uid = e.get("user_id")
+            if not uid:
+                continue
+            bits.append(
+                f"{_who({'user_id': uid, 'group_id': e.get('group_id'), 'sender': e.get('sender') or {'user_id': uid}})} "
+                f"[user_id={uid}] 加入 {_where(e)} [group_id={e.get('group_id','')}]"
+            )
         return (
-            f"【QQ 新群成员】{n} 个新成员加入：{', '.join(ids)}。可酌情欢迎。"
+            f"【QQ 新群成员】{n} 个新成员：{'; '.join(bits) or '(无明细)'}。可酌情欢迎。"
             f"\n{_OPTIONAL_REPLY_POLICY}\n{_PROMPT_FOOTER}"
         )
 

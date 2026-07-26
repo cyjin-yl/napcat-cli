@@ -323,23 +323,23 @@ class EventProcessor:
             for seg in msg_segments:
                 if isinstance(seg, dict) and seg.get("type") == "image":
                     data = seg.get("data", {})
-                    # Get image URL or file path
                     image_url = data.get("url", "")
                     file_id = data.get("file_id", "") or data.get("file", "")
                     if image_url or file_id:
+                        # Prefer URL (ocr_file now handles anti-leech download)
                         target = image_url or file_id
                         try:
                             from napcat_cli.lib.ocr import ocr_file
                             ocr_text = ocr_file(target)
                             if ocr_text:
-                                # Add OCR text to segment data for downstream use
                                 data["ocr_text"] = ocr_text
-                                # Also add summary if not present
                                 if not data.get("summary"):
                                     data["summary"] = ocr_text[:100]
-                                self.log(f"[OCR] Auto-OCR completed for image: {ocr_text[:50]}")
+                                self.log(f"[OCR] Auto-OCR completed: {ocr_text[:80]}")
+                            else:
+                                self.log(f"[OCR] No text found (downloaded OK but OCR empty) for {target[:60]}")
                         except Exception as e:
-                            self.log(f"[OCR] Failed to auto-OCR image: {e}")
+                            self.log(f"[OCR] Failed: {e}")
 
         # --- Trigger word detection on plain text (no CQ codes) ---
         segs = event.get("message", [])
