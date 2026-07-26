@@ -100,6 +100,14 @@ The daemon appends `access_token` automatically from `token` /
 
 ## 4. Agent wake: HTTP recommended, CLI legacy
 
+### Reply policy by wake reason
+
+| Reason | Must send on QQ? |
+|--------|------------------|
+| `AT_ME`, `REPLY_TO_ME`, `DM_ME` | **Yes** — may refuse/refute, but must `napcat send`/`reply` |
+| backlog / poke / friend / notices / etc. | Optional — may ignore |
+
+
 | Transport | When | Notes |
 |-----------|------|--------|
 | **HTTP** | **Default / recommended** (`wake_primary=http`) | `POST {wake_http_url}/api/sessions/{id}/chat` with Bearer key. Synchronous agent turn (often 30–60s). |

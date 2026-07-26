@@ -60,6 +60,28 @@ class TestBuildPrompt:
         p = build_prompt("SOMETHING_NEW", [{"summary": "boom"}])
         assert "SOMETHING_NEW" in p and "boom" in p
 
+    def test_at_me_requires_qq_outbound(self):
+        p = build_prompt("AT_ME", [{"user_id": 1, "sender": {"nickname": "A", "user_id": 1}, "message": [{"type":"text","data":{"text":"hi"}}], "message_type": "group", "group_id": 9}])
+        assert "强制回复" in p
+        assert "必须" in p
+        assert "不能只在内部会话写字不发送" in p or "真正往 QQ 发出" in p
+
+    def test_dm_me_requires_qq_outbound(self):
+        p = build_prompt("DM_ME", [{"user_id": 1, "sender": {"nickname": "A", "user_id": 1}, "message": [{"type":"text","data":{"text":"hi"}}], "message_type": "private"}])
+        assert "强制回复" in p
+        assert "DM_ME" in p
+
+    def test_backlog_is_optional_reply(self):
+        p = build_prompt("NEW_MESSAGE_BACKLOG", [{}, {}])
+        assert "可选回复" in p
+        assert "强制回复" not in p
+
+    def test_new_poke_is_optional_reply(self):
+        p = build_prompt("NEW_POKE", [{"sender_id": 1}])
+        assert "可选回复" in p
+        assert "强制回复" not in p
+
+
 
 # ---------------------------------------------------------------------------
 # Debounce / cooldown / backlog (timing-based; small intervals, generous waits)

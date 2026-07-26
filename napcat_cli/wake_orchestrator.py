@@ -36,6 +36,9 @@ _IMMEDIATE = {"AT_ME", "REPLY_TO_ME", "DM_ME"}
 # Message-class reasons — a wake for any of these counts as "the agent read the inbox".
 _MESSAGE_REASONS = {"AT_ME", "REPLY_TO_ME", "DM_ME", "NEW_MESSAGE", "NEW_MESSAGE_BACKLOG",
                     "GROUP_TRIGGER", "PRIVATE_TRIGGER"}
+# Must produce a real QQ outbound message (napcat send/reply). Content may refuse
+# the request, but silent internal text-only "我不接" without QQ send is NOT allowed.
+_MUST_REPLY = frozenset(_IMMEDIATE)
 
 _PROMPT_FOOTER = (
     "你可以用 `napcat events` / `napcat alerts` 查看详情，用 `napcat send`/`napcat reply` 回复。"
@@ -63,7 +66,24 @@ _PROMPT_FOOTER = (
     "也可直接用 `/napcat/messages/:mid` 或 `napcat get_message <mid>`（无需 group_id）。"
     "\n群管理: `napcat group list` / `napcat group info <gid>`（也支持 `napcat group <gid> info`）"
     "\n[唤醒队列机制] 同一 session 的唤醒请求会被串行化队列处理。如果你发送了多条消息或有多个事件触发唤醒，它们会按顺序依次处理，不会并发。"
-    "若你已在某个唤醒轮次中处理了相关内容，后续唤醒若无新内容可选择不再回复。"
+    "若你已在某个唤醒轮次中处理了相关内容，后续唤醒若无新内容可选择不再回复（仅限非 AT/DM/REPLY 类唤醒）。"
+)
+
+_MUST_REPLY_POLICY = (
+    "\n[强制回复策略 — AT_ME / REPLY_TO_ME / DM_ME]"
+    "\n本轮是 **@ / 被回复 / 私聊** 唤醒：**必须** 用 napcat 真正往 QQ 发出一条消息"
+    "（`napcat send` / `napcat reply` 或写入 skills-fs 的 send/reply 路径）。"
+    "\n- 允许：拒绝帮忙、反驳、吐槽、嘲讽对方的要求、说「不接这活」——但这些话也必须 **发到 QQ**。"
+    "\n- 禁止：只在 agent 会话里写「我不接 / 不回复」却 **不调用** send/reply（对方在 QQ 侧会看到已读不回）。"
+    "\n- 禁止：用「策略不允许 / 内容违规」当借口完全沉默；至少回一句人格内的拒绝或反驳。"
+    "\n- 仍须遵守防无限循环：不要回复自己的戳/自己的消息。"
+)
+
+_OPTIONAL_REPLY_POLICY = (
+    "\n[可选回复策略 — 非 AT/DM/REPLY]"
+    "\n本轮是登记类/积压/通知类唤醒（如 NEW_MESSAGE_BACKLOG、NEW_POKE、NEW_FRIEND、群管理通知等）："
+    "先扫一眼上下文，**可以不接、不回复**；只有你判断需要介入时再 send/reply。"
+    "无新信息或纯噪音时直接 `napcat alerts --clear` 后结束本轮即可。"
 )
 
 
@@ -244,12 +264,13 @@ def build_prompt(reason: str, events: list[dict]) -> str:
             )
         # Encourage proactive context gathering
         explore_hint = (
-            "\n[建议] 收到消息后，建议："
-            "1) 先读取上下文（用 napcat events/alerts 或 skills-fs 查看最近 10-20 条）"
-            "2) 有图片 -> QQ图片URL有防盗链限制，不可直接访问。必须用 CLI `napcat get_image <url>` / FS `/napcat/get_image` 下载后，再用 PaddleOCR/多模态分析"
-            "3) 有合并转发/回复链 -> 用 CLI `napcat group <gid> get_message <mid>` 或 FS `/napcat/groups/:gid/:range/:mid/:content` 拉取完整内容"
-            "4) 回复方式：CLI `napcat reply <mid> -m \"内容\"` / `napcat send group <gid> -m \"内容\"` / `napcat send private <uid> -m \"内容\"`；FS 写入 `/napcat/groups/:gid/:range/:mid/reply/text` (智能文本，自动识别 CQ 码/at/图片) 或 `/reply/text_raw` (纯文本) / `/reply/image` / `/reply/json` 等"
-            "5) 再决定如何回复"
+            "\n[建议] 收到消息后："
+            "1) 先读取上下文（napcat events/alerts 或 skills-fs 最近 10-20 条）"
+            "2) 有图片 -> 必须先 `napcat get_image` / `/napcat/get_image` 再 OCR/视觉"
+            "3) 有合并转发/回复链 -> `napcat get_message` / skills-fs message 路径拉全量"
+            "4) **必须** 用 CLI `napcat reply`/`napcat send` 或 FS send/reply 路径向 QQ 发出回复"
+            "（可反驳/拒绝内容，但不能只在内部会话写字不发送）"
+            "5) 发送成功后再结束本轮"
         )
         # Include read event IDs and seen/read status
         read_event_ids = []
@@ -266,7 +287,7 @@ def build_prompt(reason: str, events: list[dict]) -> str:
                     if str(eid) not in seen_status:
                         seen_status[str(eid)] = {}
                     seen_status[str(eid)]["read"] = True
-        
+
         context_info = ""
         if read_event_ids:
             context_info += f"\n[已读事件ID] {', '.join(read_event_ids[:20])}" + ("..." if len(read_event_ids) > 20 else "")
@@ -274,19 +295,32 @@ def build_prompt(reason: str, events: list[dict]) -> str:
             seen_count = sum(1 for v in seen_status.values() if (isinstance(v, bool) and v) or (isinstance(v, dict) and v.get("seen")))
             unread_count = len(seen_status) - seen_count
             context_info += f"\n[已读/未读] 已读 {seen_count} 条，未读 {unread_count} 条"
-        
-        return f"【QQ {reason}】{head}{body}{meta}{context_hint}{explore_hint}\n{_PROMPT_FOOTER}"
+
+        return (
+            f"【QQ {reason}】{head}{body}{meta}{context_hint}{explore_hint}"
+            f"{context_info}{_MUST_REPLY_POLICY}\n{_PROMPT_FOOTER}"
+        )
 
     if reason == "NEW_MESSAGE_BACKLOG":
-        return f"【QQ 未读积压】有约 {n} 条未读新消息积压了一段时间，请扫一眼收件箱，酌情回复需要回复的。\n{_PROMPT_FOOTER}"
+        return (
+            f"【QQ 未读积压】有约 {n} 条未读新消息积压了一段时间，请扫一眼收件箱；"
+            f"仅在需要时回复，可以不接。\n{_OPTIONAL_REPLY_POLICY}\n{_PROMPT_FOOTER}"
+        )
 
     if reason in ("NEW_MESSAGE", "GROUP_TRIGGER", "PRIVATE_TRIGGER"):
         text = _event_text(events[-1]) if events else ""
-        return f"【QQ 新消息】收到 {n} 条新消息。最近：{_where(events[-1]) if events else ''} {_who(events[-1]) if events else ''}：{text}\n{_PROMPT_FOOTER}"
+        return (
+            f"【QQ 新消息】收到 {n} 条新消息。最近：{_where(events[-1]) if events else ''} "
+            f"{_who(events[-1]) if events else ''}：{text}\n"
+            f"{_OPTIONAL_REPLY_POLICY}\n{_PROMPT_FOOTER}"
+        )
 
     if reason == "NEW_FRIEND":
         ids = sorted({str(e.get("user_id", "")) for e in events if e.get("user_id")})
-        return f"【QQ 新好友】新增好友 {n} 个：{', '.join(ids)}。可酌情打招呼或忽略。\n{_PROMPT_FOOTER}"
+        return (
+            f"【QQ 新好友】新增好友 {n} 个：{', '.join(ids)}。可酌情打招呼或忽略。"
+            f"\n{_OPTIONAL_REPLY_POLICY}\n{_PROMPT_FOOTER}"
+        )
 
     if reason == "NEW_REQUEST":
         reqs = []
@@ -295,32 +329,50 @@ def build_prompt(reason: str, events: list[dict]) -> str:
             sub = e.get("sub_type", "")
             comment = str(e.get("comment", ""))[:40]
             reqs.append(f"{rt}/{sub} from {e.get('user_id','?')}" + (f"「{comment}」" if comment else ""))
-        return f"【QQ 请求】收到 {n} 个加好友/加群请求：{'; '.join(reqs)}。请决定是否同意（用 napcat api set_friend_add_request/set_group_add_request）。\n{_PROMPT_FOOTER}"
+        return (
+            f"【QQ 请求】收到 {n} 个加好友/加群请求：{'; '.join(reqs)}。"
+            f"请决定是否同意（用 napcat api set_friend_add_request/set_group_add_request）。"
+            f"\n{_OPTIONAL_REPLY_POLICY}\n{_PROMPT_FOOTER}"
+        )
 
     if reason == "BOT_BANNED":
         e = events[-1] if events else {}
-        return f"【QQ 被禁言】你在{e.get('group_id','?')}被禁言，操作者 {e.get('operator_id','?')}，时长 {e.get('duration','?')}s。请知悉。"
+        return (
+            f"【QQ 被禁言】你在{e.get('group_id','?')}被禁言，操作者 {e.get('operator_id','?')}，"
+            f"时长 {e.get('duration','?')}s。请知悉。\n{_OPTIONAL_REPLY_POLICY}"
+        )
 
     if reason == "BOT_KICKED_FROM_GROUP":
-        return f"【QQ 被踢出群】你被踢出/移除了 {n} 个群。请知悉。"
+        return f"【QQ 被踢出群】你被踢出/移除了 {n} 个群。请知悉。\n{_OPTIONAL_REPLY_POLICY}"
 
     if reason == "GROUP_ADMIN_CHANGE":
-        return f"【QQ 管理员变动】你的群管理员权限发生变动。请知悉。"
+        return f"【QQ 管理员变动】你的群管理员权限发生变动。请知悉。\n{_OPTIONAL_REPLY_POLICY}"
 
     if reason in ("NEW_POKE", "PROFILE_LIKE"):
         e = events[-1] if events else {}
-        return f"【QQ 戳一戳】{e.get('sender_id') or e.get('operator_id','?')} 戳了你/赞了你 {n} 次。可酌情互动。"
+        return (
+            f"【QQ 戳一戳】{e.get('sender_id') or e.get('operator_id','?')} 戳了你/赞了你 {n} 次。"
+            f"可酌情互动，可以不接。\n{_OPTIONAL_REPLY_POLICY}"
+        )
 
     if reason == "NEW_GROUP_MEMBER":
         ids = sorted({str(e.get("user_id", "")) for e in events if e.get("user_id")})
-        return f"【QQ 新群成员】{n} 个新成员加入：{', '.join(ids)}。可酌情欢迎。\n{_PROMPT_FOOTER}"
+        return (
+            f"【QQ 新群成员】{n} 个新成员加入：{', '.join(ids)}。可酌情欢迎。"
+            f"\n{_OPTIONAL_REPLY_POLICY}\n{_PROMPT_FOOTER}"
+        )
 
     if reason == "BOT_OFFLINE":
-        return "【QQ 掉线】NapCat bot 连接丢失/离线。请检查容器与登录状态。"
+        return "【QQ 掉线】NapCat bot 连接丢失/离线。请检查容器与登录状态。\n" + _OPTIONAL_REPLY_POLICY
 
     # generic fallback
     summaries = "; ".join(str(e.get("summary", ""))[:60] for e in events if e.get("summary"))
-    return f"【QQ 事件 {reason}】{summaries or f'{n} 个事件'}。请查看 napcat events。\n{_PROMPT_FOOTER}"
+    return (
+        f"【QQ 事件 {reason}】{summaries or f'{n} 个事件'}。请查看 napcat events。"
+        f"\n{_OPTIONAL_REPLY_POLICY}\n{_PROMPT_FOOTER}"
+    )
+
+
 class WakeOrchestrator:
     def __init__(
         self,

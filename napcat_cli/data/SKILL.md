@@ -424,6 +424,12 @@ OneBot11 `network.httpServers` / `websocketServers` may be empty, or Docker
 host ports may be cross-mapped (18800=HTTP, 18801=WS). WS auth needs
 `?access_token=` on the URL. Run `napcat config help` or see `docs/CONFIGURATION.md`.
 
+### AT/DM/REPLY must send on QQ
+
+For `AT_ME` / `REPLY_TO_ME` / `DM_ME`, the wake prompt includes **强制回复策略**:
+always call `napcat send`/`napcat reply` (or FS write). Refusing the request is OK
+as long as the refusal is **sent to QQ**. Only non-AT/DM registration wakes may no-op.
+
 ### Wake delivered on CLI but no QQ reply
 
 CLI is **LEGACY / not recommended**. Prefer `wake_primary=http` + Hermes
