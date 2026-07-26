@@ -76,6 +76,55 @@ napcat setup --yes              # skip token validation
 napcat setup --force            # overwrite existing config.json (skills-fs.json only if broken)
 ```
 
+### NapCat OneBot11 binding & Docker port cross-mapping
+
+NapCat ships with OneBot11 **disabled by default**; you must enable it inside the
+container config `/app/napcat/config/onebot11_<self_id>.json` — otherwise the
+napcat-cli WS/HTTP connections get an immediate reset (`Connection reset by
+peer` / `Not logged in`), even when the QQ account itself is online.
+
+Minimum worker config (see the bundled example
+`napcat_cli/data/onebot11.example.json`):
+
+- One HTTP server on container port `3000` (host: any free port).
+- One WebSocket server on container port `3001` (host: any free port).
+- `token: <random_secret>` on **both** — keep it synchronised with `napcat-cli`
+  config (`napcat config set token <value>`). Empty token = unauthenticated.
+- For Docker deployments, also enable **quick auto-login** in
+  `/app/napcat/config/webui.json` (`"autoLoginAccount": "<self_id>"`) so a
+  container restart uses the saved session instead of presenting a new QR code.
+
+> ⚠️ **Docker cross-mapping gotcha.** Your `docker run -p HOST:CONTAINER` mapping
+> can transpose host and container ports. With NapCat defaults (HTTP `3000`,
+> WS `3001`), many setups publish `18800:3000` and `18801:3001`. That means the
+> host-side OneBot11 **HTTP** URL is `http://127.0.0.1:18800` and the **WS** URL
+> is `ws://127.0.0.1:18801` — note the swap relative to the conventional
+> napcat-cli defaults (`api_url=...18801`, `ws_port=18800`). If `napcat status`
+> says "Connection reset by peer" but the bot appears online in the WebUI,
+> check `docker port napcat` and align `api_url` / `ws_url` / `ws_port` with
+> the actual host mapping:
+>
+> ```bash
+> napcat config set api_url http://127.0.0.1:18800      # host HTTP
+> napcat config set ws_url   ws://127.0.0.1:18801        # host WS (overrides ws_port)
+> napcat config set token   <the-onebot11-token>
+> napcat daemon start
+> ```
+
+### Example config files (no commitable secrets)
+
+`~/.napcat-data/{config,daemon}.json` are user-state files and are gitignored.
+Reference copies with `<SET_ME>` / `REPLACE_ME_WITH_RANDOM_SECRET` placeholders
+live in the repo for orientation:
+
+- `napcat_cli/data/config.json.example` — napcat-cli client (api_url, token, ws_url, ...).
+- `napcat_cli/data/daemon.json.example` — daemon (`watch.py` runtime config).
+- `napcat_cli/data/onebot11.example.json` — NapCat container-side OneBot11 worker.
+
+`napcat daemon start` prints **advisory warnings** if the token is empty or
+OneBot URLs look mis-mapped; it never blocks startup. Run `napcat daemon start`
+after changing any of these via `napcat config set ...`.
+
 ## Agent Wake
 
 When a notable QQ event arrives, the daemon wakes an external agent (Hermes by

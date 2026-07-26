@@ -56,7 +56,7 @@ class TestWriteDaemonJson:
         data = json.loads(daemon_file.read_text())
         expected_keys = {
             "self_id", "wake_command", "wake_on_event",
-            "ws_port", "http_port",
+            "ws_port", "ws_url", "http_port", "api_url", "token",
             "group_trigger_word", "private_trigger",
             "skills_fs_enabled", "skills_fs_mountpoint",
             "skills_fs_binary", "skills_fs_config",

@@ -28,6 +28,10 @@ def get_db_path(data_dir: Path | None = None) -> Path:
 def get_connection(data_dir: Path | None = None) -> sqlite3.Connection:
     """Get a connection to the events database, creating it if needed."""
     db_path = get_db_path(data_dir)
+    # sqlite3.connect() creates the file but not its parent dir. Tests and fresh
+    # deployments pass a data_dir that may not exist yet; ensure it does.
+    if data_dir is not None:
+        Path(data_dir).mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path), check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")

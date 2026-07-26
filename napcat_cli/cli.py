@@ -435,13 +435,34 @@ def cmd_daemon(args: argparse.Namespace, api: NapCatAPI) -> int:
         if not self_id:
             print("Warning: self_id is empty — @mentions (AT_ME) will not wake. "
                   "Run 'napcat status' or 'napcat config set self_id <qq>'.", file=sys.stderr)
+        # Surface OneBot11 connection config so users notice when they have not
+        # set it (empty token or stock ports may silently 401/reset against a
+        # remote NapCat). Purely advisory — daemon still runs.
+        if not cfg.token or cfg.token == "":
+            print("Warning: OneBot11 access token is empty. If NapCat's OneBot11 "
+                  "config has a token set, the WS/HTTP connection will be rejected. "
+                  "Run 'napcat config set token <value>'.", file=sys.stderr)
+        if not cfg.api_url:
+            print("Warning: api_url is empty. Set OneBot11 HTTP API URL via "
+                  "'napcat config set api_url http://host:port'.", file=sys.stderr)
+        if not cfg.ws_url:
+            # No explicit WS URL override is fine — watch.py derives it from ws_port.
+            # But when the host port is cross-mapped vs NapCat's container port
+            # (e.g. host 18801 -> container 3001), users must set ws_url explicitly
+            # or ws_port to the actual host port.
+            print(f"Info: ws_url not set — daemon will use ws://127.0.0.1:{cfg.ws_port}. "
+                  "If NapCat WS is on a different host port (cross-mapped Docker? "
+                  "remote?), set ws_url or ws_port accordingly.", file=sys.stderr)
         cfg_path = DATA_DIR / "daemon.json"
         cfg_dict = {
             "self_id": self_id,
             "wake_command": cfg.wake_command,
             "wake_on_event": cfg.wake_on_event,
             "ws_port": cfg.ws_port,
+            "ws_url": cfg.ws_url,                  # explicit WS URL override (e.g. cross-mapped host port)
             "http_port": cfg.http_port,
+            "api_url": cfg.api_url,                # OneBot11 HTTP API URL (passed to health_check_task)
+            "token": cfg.token,                    # OneBot11 access token (HTTP + WS bearer)
             "group_trigger_word": cfg.group_trigger_word,
             "private_trigger": cfg.private_trigger,
             "skills_fs_enabled": cfg.skills_fs_enabled,

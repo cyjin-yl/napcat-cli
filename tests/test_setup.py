@@ -48,7 +48,8 @@ class TestSetupNonInteractive:
         daemon_data = json.loads((tmp_path / "daemon.json").read_text())
         expected = {
             "self_id", "wake_command", "wake_on_event",
-            "ws_port", "http_port", "group_trigger_word", "private_trigger",
+            "ws_port", "ws_url", "http_port", "api_url", "token",
+            "group_trigger_word", "private_trigger",
             "skills_fs_enabled", "skills_fs_mountpoint",
             "skills_fs_binary", "skills_fs_config",
             "wake_enabled", "wake_preset", "wake_primary", "wake_session",

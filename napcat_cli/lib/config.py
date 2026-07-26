@@ -20,6 +20,14 @@ class _LazyPath:
         return str(_get_data_dir())
     def __repr__(self):
         return f"DATA_DIR({_get_data_dir()!s})"
+    def __fspath__(self):
+        # Make _LazyPath a valid os.PathLike so Path(DATA_DIR), Path(DATA_DIR)/foo,
+        # and os.makedirs(DATA_DIR, ...) all resolve correctly across reloads.
+        return str(_get_data_dir())
+    def __eq__(self, other):
+        return str(self) == str(other)
+    def __hash__(self):
+        return hash(str(self))
 
 
 DATA_DIR = _LazyPath()
@@ -33,6 +41,7 @@ class NapCatConfig:
     self_id: str | None = None
     webhook_port: int = 18820
     ws_port: int = 18800
+    ws_url: str = ""                  # explicit WS URL override; "" => derive from ws_port in watch.py
     http_port: int = 18821
     wake_on_event: bool = True          # deprecated alias of wake_enabled (back-compat)
     wake_command: str = ""              # legacy shell escape hatch (used only if no backend configured)

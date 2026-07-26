@@ -19,7 +19,10 @@ def _write_daemon_json(cfg: NapCatConfig, data_dir: str | Path) -> None:
         "wake_command": cfg.wake_command,
         "wake_on_event": cfg.wake_on_event,
         "ws_port": cfg.ws_port,
+        "ws_url": cfg.ws_url,                  # explicit WS URL override
         "http_port": cfg.http_port,
+        "api_url": cfg.api_url,                # OneBot11 HTTP API URL
+        "token": cfg.token,                    # OneBot11 access token
         "group_trigger_word": cfg.group_trigger_word,
         "private_trigger": cfg.private_trigger,
         "skills_fs_enabled": cfg.skills_fs_enabled,
