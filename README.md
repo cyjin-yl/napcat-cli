@@ -102,7 +102,7 @@ Minimum worker config (see the bundled example
   `/app/napcat/config/webui.json` (`"autoLoginAccount": "<self_id>"`) so a
   container restart uses the saved session instead of presenting a new QR code.
 
-> ⚠️ **Docker cross-mapping gotcha.** Your `docker run -p HOST:CONTAINER` mapping
+> **Docker cross-mapping note.** Your `docker run -p HOST:CONTAINER` mapping
 > can transpose host and container ports. With NapCat defaults (HTTP `3000`,
 > WS `3001`), many setups publish `18800:3000` and `18801:3001`. That means the
 > host-side OneBot11 **HTTP** URL is `http://127.0.0.1:18800` and the **WS** URL
@@ -159,7 +159,7 @@ QQ Event (WS) --> EventProcessor --> WakeOrchestrator (debounce/cooldown/queue)
 Every wake is logged to `daemon.log`:
 ```
 [WAKE] trigger reason=AT_ME who=Alice where=group123 text='hello'
-[WAKE] queued reason=AT_ME pending=1 debounce=1.0s primary=auto
+[WAKE] queued reason=AT_ME pending=1 debounce=1.0s primary=http
 [WAKE] delivered reason=AT_ME transport=http detail=POST /api/sessions/.../chat -> 200
 ```
 
@@ -176,11 +176,11 @@ AT_ME detection supports all NapCat message formats: CQ code (`[CQ:at,qq=...]`),
 
 ### Two transports — HTTP recommended, CLI legacy
 
-> ⚠️ **Wake transport recommendation.** The **HTTP API server is the recommended
+> **Wake transport recommendation.** The **HTTP API server is the recommended
 > transport** for agent wake. The CLI one-shot backend is kept as a **legacy
 > fallback** for environments where running the API server isn't viable — it is
 > known to be **less reliable** (process-spawn latency, quoting hazards,
-> new-session drift, no idempotency). When `wake_primary=auto` falls back to
+> new-session drift, no idempotency). When `wake_primary=http` falls back to
 > CLI because HTTP is unreachable, the wake may appear to succeed but never
 > deliver the prompt (only HTTP returns a real `delivered` in `daemon.log`).
 > **Enable the HTTP API server first** — only keep CLI for diagnostic
@@ -189,10 +189,10 @@ AT_ME detection supports all NapCat message formats: CQ code (`[CQ:at,qq=...]`),
 
 | Transport | Status | When it picks | Needs |
 |-----------|--------|---------------|-------|
-| **HTTP API server** | **RECOMMENDED** | `primary=http` or `primary=auto` when configured + reachable | `wake_http_url` + `wake_http_key` (bearer) |
-| **CLI one-shot** | **LEGACY / 不推荐** | `primary=cli` (forced) or `primary=auto` only if HTTP is **not configured/unreachable** as a last-resort fallback | Agent CLI on PATH |
+| **HTTP API server** | **RECOMMENDED** | `primary=http` or `primary=http` when configured + reachable | `wake_http_url` + `wake_http_key` (bearer) |
+| **CLI one-shot** | **LEGACY / 不推荐** | `primary=cli` (forced) or `primary=http` only if HTTP is **not configured/unreachable** as a last-resort fallback | Agent CLI on PATH |
 
-`wake_primary=auto` tries HTTP first (if configured + reachable), else falls back to CLI.
+`wake_primary=http` tries HTTP first (if configured + reachable), else falls back to CLI.
 
 ### Configuring for Hermes Agent
 
@@ -234,7 +234,7 @@ curl -X POST http://127.0.0.1:8642/api/sessions \
 ```bash
 napcat config set wake_enabled true
 napcat config set wake_preset hermes
-napcat config set wake_primary auto              # try HTTP first, CLI fallback
+napcat config set wake_primary http              # try HTTP first, CLI fallback
 napcat config set wake_http_url http://127.0.0.1:8642
 napcat config set wake_http_key <API_SERVER_KEY>
 napcat config set wake_http_session_id <SESSION_ID>  # from Step 2
@@ -247,7 +247,7 @@ Or edit `~/.napcat-data/daemon.json` directly:
 {
   "wake_enabled": true,
   "wake_preset": "hermes",
-  "wake_primary": "auto",
+  "wake_primary": "http",
   "wake_http_url": "http://127.0.0.1:8642",
   "wake_http_key": "<API_SERVER_KEY>",
   "wake_http_session_id": "<SESSION_ID>",
@@ -262,10 +262,10 @@ Key env vars (also checked by Hermes preset, in priority order):
 
 #### Option B: CLI one-shot — **LEGACY / 不推荐**
 
-> ⚠️ **Not recommended.** Prefer **Option A** (HTTP). The CLI backend is kept
+> **Not recommended.** Prefer **Option A** (HTTP). The CLI backend is kept
 > for environments where running the API server isn't viable, but it has
 > multiple known failure modes (process-spawn latency, quoting hazards, no
-> idempotency, new-session drift). When `wake_primary=auto` falls back to CLI
+> idempotency, new-session drift). When `wake_primary=http` falls back to CLI
 > after an HTTP probe fails, the wake often **appears** to succeed but never
 > delivers the prompt to the agent. Diagnose by running
 > `grep '\[WAKE\]' ~/.napcat-data/daemon.log` — only the HTTP backend writes a
@@ -307,7 +307,7 @@ napcat config set wake_http_key my-secret-key
 
 #### Custom CLI command — **LEGACY / 不推荐**
 
-> ⚠️ **Not recommended.** The shell-command backend is kept for legacy /
+> **Not recommended.** The shell-command backend is kept for legacy /
 > experimental setups only. Prefer **Custom HTTP endpoint** above — see the
 > "Two transports — HTTP recommended, CLI legacy" note at the top of this
 > section for why.
@@ -368,7 +368,7 @@ path) — see `napcat_cli/data/SKILL.md`.
    ```
 
 4. **Test CLI wake manually (legacy — prefer HTTP test above):**
-   > ⚠️ CLI is **legacy / not recommended**. This reference is kept for
+   > CLI is **legacy / not recommended**. This reference is kept for
    > diagnosing environments where the HTTP API server is genuinely unavailable.
    > Only test CLI as a last resort — the HTTP test (step 3) is the one that
    > matters.
@@ -383,7 +383,7 @@ path) — see `napcat_cli/data/SKILL.md`.
 |---------|-------|-----|
 | Bot doesn't respond to @mentions | Daemon not running, or crash killed event loop | `ps aux \| grep watch.py`; check `daemon.log` for errors; restart daemon |
 | Connection reset / Not logged in while QQ online | Empty OneBot11 network or port cross-map / missing `?access_token=` | `napcat config help`; enable WS+HTTP in container; align `api_url`/`ws_url`/`token` |
-| `[WAKE] delivered` `transport=cli` but no reply | **Legacy CLI** only exited 0 | Set `wake_primary=http` + Hermes `API_SERVER_KEY`; expect `/chat -> 200` |
+| `[WAKE] delivered` `transport=cli` but no reply | CLI is legacy and may exit 0 without delivering | Set `wake_primary=http` (default) + Hermes `API_SERVER_KEY`; expect `/chat -> 200` |
 | `[WAKE] delivered` http but no reply | Agent turn ran but did not send QQ | Check Hermes session/tools; model 502/fallback in `~/.hermes/logs/agent.log` |
 | `[WAKE] failed ... timeout` | Agent took > `wake_timeout` seconds | Increase `wake_timeout`; HTTP turns can take 30–60s |
 | `[WAKE] failed ... session resolution failed` | HTTP session ID not found | Run `napcat wake sessions`; recreate if needed |

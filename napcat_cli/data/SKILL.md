@@ -102,7 +102,7 @@ napcat daemon status
 
 | Command | Description |
 |---------|-------------|
-| `napcat group poke <gid> <uid>` | Poke a member ✅ |
+| `napcat group poke <gid> <uid>` | Poke a member  |
 | `napcat group mute <gid> <uid> [seconds]` | Mute a member |
 | `napcat group unmute <gid> <uid>` | Unmute |
 | `napcat group kick <gid> <uid>` | Kick a member |

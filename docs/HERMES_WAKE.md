@@ -17,7 +17,7 @@ Each step is logged to `daemon.log` with a `[WAKE]` prefix:
 
 ```
 [2026-07-22 00:12:03] [WAKE] trigger reason=AT_ME who=Alice(123) where=group456 text='在吗'
-[2026-07-22 00:12:03] [WAKE] queued reason=AT_ME pending=1 debounce=1.0s primary=auto
+[2026-07-22 00:12:03] [WAKE] queued reason=AT_ME pending=1 debounce=1.0s primary=http
 [2026-07-22 00:12:05] [WAKE] deliver reason=AT_ME transport=cli ok=True elapsed=2.1s :: exit=0
 [2026-07-22 00:12:05] [WAKE] reply reason=AT_ME transport=cli: 在的，怎么了？
 ```

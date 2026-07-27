@@ -310,3 +310,18 @@ All wake/alert text that names a group or person uses one builder
 | Person | `(群名片)(用户昵称)(QQ号)` | `([hubot] --dangerously-skip-permissions)(復州河野鳥)(1293883574)` |
 
 Empty fields keep the parentheses so the triple is always parseable.
+
+
+## 11. napcat auth commands
+
+| Command | Description |
+|---------|-------------|
+| `napcat auth` | Check login + online status |
+| `napcat auth qr` | Fetch QR code (ASCII art in terminal + URL + image file) |
+| `napcat auth quick-login <qq>` | Set autoLoginAccount in webui.json, restart NapCat |
+| `napcat auth set-password <qq> <password>` | Save QQ password for auto quick-login (gitignored config) |
+| `napcat auth recreate` | Recreate Docker container with ACCOUNT + NAPCAT_QUICK_PASSWORD env |
+
+Password is stored only in `~/.napcat-data/config.json` (gitignored). It is
+passed as a Docker env var at container creation time. Never written to
+tracked files. `config show` redacts it as `(set)`.
