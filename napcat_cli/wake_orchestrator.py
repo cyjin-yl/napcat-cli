@@ -625,64 +625,81 @@ class WakeOrchestrator:
         self._enqueue(reason, events)
 
     def _run(self) -> None:
+        """Worker loop: dequeues events in order, dispatches each to a thread.
+
+        The queue never blocks on a slow Hermes turn — each wake runs in its own
+        thread so the next queued event is immediately picked up. Concurrency is
+        capped by ``max_concurrent_wakes`` to prevent stampeding the agent API.
+        Ordering is preserved for the *enqueue* side (events are processed in the
+        order they arrived), though the *delivery* to Hermes may overlap for
+        concurrent reasons.
+        """
         while True:
             item = self._queue.get()
             if item is None:
                 break
             reason, _ctx, events = item
-            
-            # Enforce concurrency limit for immediate reasons
-            if reason in _IMMEDIATE:
-                with self._active_wakes_lock:
-                    if len(self._active_wakes) >= self.max_concurrent_wakes:
-                        self.log(f"[WAKE] max concurrent wakes reached ({self.max_concurrent_wakes}), deferring {reason}")
-                        # re-queue with a small delay
-                        threading.Timer(0.5, lambda: self.submit(reason, events[0] if events else None)).start()
-                        self._queue.task_done()
-                        continue
-                    self._active_wakes.add(reason)
-            
-            try:
-                # Auto-mark seen: mark event IDs as seen when included in wake prompt
-                if self.events_reader and events:
-                    event_ids = [e.get("id") for e in events if isinstance(e, dict) and e.get("id")]
-                    if event_ids:
-                        self.events_reader.mark_seen(event_ids)
-                
-                # Add seen/read status to events for prompt
-                if self.events_reader and events:
-                    event_ids = [e.get("id") for e in events if isinstance(e, dict) and e.get("id")]
-                    if event_ids:
-                        seen_status = self.events_reader.get_seen_status(event_ids)
-                        for e in events:
-                            if isinstance(e, dict):
-                                eid = e.get("id")
-                                if eid and eid in seen_status:
-                                    e["seen"] = seen_status[eid]
-                                    # Also check if read
-                                    from napcat_cli.lib.events_sqlite import get_connection
-                                    conn = get_connection(self.events_reader.data_dir)
-                                    cur = conn.execute("SELECT read_timestamp FROM events WHERE id = ?", (eid,))
-                                    row = cur.fetchone()
-                                    if row and row[0]:
-                                        e["read"] = True
-                                    conn.close()
-                
-                # Build prompt
-                prompt = build_prompt(reason, events)
-                # Delegate to waker
-                result = self.waker.wake(prompt, reason, {}, timeout=self.wake_timeout)
-                if result.ok:
-                    self.log(f"[WAKE] delivered reason={reason} transport={result.transport} detail={result.detail[:100]}")
-                else:
-                    self.log(f"[WAKE] failed reason={reason} transport={result.transport} detail={result.detail}")
-            except Exception as e:
-                self.log(f"Wake error: {e}")
-            finally:
-                if reason in _IMMEDIATE:
-                    with self._active_wakes_lock:
-                        self._active_wakes.discard(reason)
-                self._queue.task_done()
+
+            # Enforce concurrency limit
+            with self._active_wakes_lock:
+                if len(self._active_wakes) >= self.max_concurrent_wakes:
+                    self.log(
+                        f"[WAKE] max concurrent ({self.max_concurrent_wakes}) reached, "
+                        f"re-queuing {reason}"
+                    )
+                    threading.Timer(
+                        0.5,
+                        lambda r=reason, ev=events: self._enqueue(r, ev),
+                    ).start()
+                    self._queue.task_done()
+                    continue
+                self._active_wakes.add(reason)
+
+            # Dispatch to a thread so the queue stays responsive
+            t = threading.Thread(
+                target=self._deliver_wake,
+                args=(reason, events),
+                name=f"napcat-wake-{reason}",
+                daemon=True,
+            )
+            t.start()
+            # Don't task_done here — _deliver_wake does it after completion
+
+    def _deliver_wake(self, reason: str, events: list[dict]) -> None:
+        """Run a single wake (called from a worker thread)."""
+        try:
+            # Auto-mark seen
+            if self.events_reader and events:
+                event_ids = [e.get("id") for e in events if isinstance(e, dict) and e.get("id")]
+                if event_ids:
+                    self.events_reader.mark_seen(event_ids)
+                    seen_status = self.events_reader.get_seen_status(event_ids)
+                    for e in events:
+                        if isinstance(e, dict):
+                            eid = e.get("id")
+                            if eid and eid in seen_status:
+                                e["seen"] = seen_status[eid]
+                                from napcat_cli.lib.events_sqlite import get_connection
+                                conn = get_connection(self.events_reader.data_dir)
+                                cur = conn.execute("SELECT read_timestamp FROM events WHERE id = ?", (eid,))
+                                row = cur.fetchone()
+                                if row and row[0]:
+                                    e["read"] = True
+                                conn.close()
+
+            # Build prompt and deliver
+            prompt = build_prompt(reason, events)
+            result = self.waker.wake(prompt, reason, {}, timeout=self.wake_timeout)
+            if result.ok:
+                self.log(f"[WAKE] delivered reason={reason} transport={result.transport} detail={result.detail[:100]}")
+            else:
+                self.log(f"[WAKE] failed reason={reason} transport={result.transport} detail={result.detail}")
+        except Exception as e:
+            self.log(f"Wake error: {e}")
+        finally:
+            with self._active_wakes_lock:
+                self._active_wakes.discard(reason)
+            self._queue.task_done()
 
     def _enqueue(self, reason: str, events: list[dict]) -> None:
         """Enqueue a wake for the worker thread."""
