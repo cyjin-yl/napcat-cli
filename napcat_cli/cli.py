@@ -1079,7 +1079,8 @@ def _docker_cmd(cmd_args: list[str], *, timeout: int = 10) -> tuple[bool, str]:
                 capture_output=True, text=True, timeout=timeout,
             )
             if r.returncode == 0:
-                return True, r.stdout
+                # Merge stdout+stderr: NapCat prints QR art and some logs to stderr
+                return True, r.stdout + r.stderr
         except Exception:
             continue
     return False, ""
@@ -1207,20 +1208,33 @@ def _auth_qr(args: argparse.Namespace, api: NapCatAPI) -> int:
     # Always try logs for ASCII art + URL (works even without docker cp access)
     logs = _read_napcat_logs_tail(100)
 
-    # 1. Extract ASCII QR art from logs (NapCat prints it between blank lines)
+    # 1. Extract ASCII QR art from logs.
+    # NapCat prints QR using ▄/█ block chars. Extract the last (most recent) block.
     ascii_lines = []
-    in_qr = False
-    for line in logs.splitlines():
-        if "请扫描下面的二维码" in line:
-            in_qr = True
-            continue
-        if in_qr:
-            if "二维码解码URL" in line or "二维码已保存" in line:
-                break
-            if line.strip():  # non-empty line = QR art
-                ascii_lines.append(line)
-            elif ascii_lines:  # blank line after QR art = end
-                break
+    lines = logs.splitlines()
+    # Find the last QR block: scan backwards for 二维码解码URL, then walk
+    # backwards collecting ▄/█ lines until we hit a non-QR line.
+    for i in range(len(lines) - 1, -1, -1):
+        if "二维码解码URL" in lines[i]:
+            # Walk backwards from i-1 collecting QR art lines
+            j = i - 1
+            block = []
+            while j >= 0:
+                stripped = lines[j].strip()
+                # Remove ANSI escape codes for matching
+                import re as _re
+                clean = _re.sub(r'\x1b\[[0-9;]*m', '', stripped)
+                clean = clean.replace('\x1b[33m', '').replace('\x1b[39m', '')
+                if clean and ('▄' in clean or '█' in clean):
+                    block.insert(0, clean)
+                    j -= 1
+                elif clean == '' and not block:
+                    j -= 1  # skip leading blanks
+                else:
+                    break
+            if block:
+                ascii_lines = block
+            break
     if ascii_lines:
         print("", file=sys.stderr)
         for line in ascii_lines:
