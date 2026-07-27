@@ -1204,31 +1204,50 @@ def _auth_qr(args: argparse.Namespace, api: NapCatAPI) -> int:
     qr_path = "/tmp/napcat-login-qr.png"
     found = False
 
-    # 1. Copy qrcode.png from cache
+    # Always try logs for ASCII art + URL (works even without docker cp access)
+    logs = _read_napcat_logs_tail(100)
+
+    # 1. Extract ASCII QR art from logs (NapCat prints it between blank lines)
+    ascii_lines = []
+    in_qr = False
+    for line in logs.splitlines():
+        if "请扫描下面的二维码" in line:
+            in_qr = True
+            continue
+        if in_qr:
+            if "二维码解码URL" in line or "二维码已保存" in line:
+                break
+            if line.strip():  # non-empty line = QR art
+                ascii_lines.append(line)
+            elif ascii_lines:  # blank line after QR art = end
+                break
+    if ascii_lines:
+        print("", file=sys.stderr)
+        for line in ascii_lines:
+            print(line, file=sys.stderr)
+        print("", file=sys.stderr)
+        found = True
+
+    # 2. Extract QR decode URL
+    urls = re.findall(r"https://txz\.qq\.com/p\?k=\S+", logs)
+    if urls:
+        url = urls[-1].strip()
+        print(f"QR decode URL (or copy to QR generator):", file=sys.stderr)
+        print(url)
+        found = True
+
+    # 3. Also try to copy qrcode.png image as backup
     if _copy_napcat_file("cache/qrcode.png", qr_path):
         if os.path.exists(qr_path) and os.path.getsize(qr_path) > 100:
-            print(f"QR code image saved: {qr_path}", file=sys.stderr)
-            print("Open it and scan with mobile QQ to login.", file=sys.stderr)
-            print(qr_path)
+            print(f"QR image also saved: {qr_path}", file=sys.stderr)
             found = True
 
-    # 2. Extract QR decode URL from logs
-    if not found:
-        logs = _read_napcat_logs_tail(80)
-        urls = re.findall(r"https://txz\.qq\.com/p\?k=\S+", logs)
-        if urls:
-            url = urls[-1].strip()
-            if not found:
-                print("QR decode URL (copy to a QR generator website to scan):", file=sys.stderr)
-            print(url)
-            found = True
-
-    # 3. Also check stdout from NapCat process (bare metal via journalctl/systemctl)
+    # 4. Bare-metal journalctl fallback
     if not found:
         try:
             import subprocess
             r = subprocess.run(
-                ["journalctl", "-u", "napcat", "--no-pager", "-n", "80"],
+                ["journalctl", "-u", "napcat", "--no-pager", "-n", "100"],
                 capture_output=True, text=True, timeout=5,
             )
             if r.returncode == 0:
