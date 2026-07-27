@@ -74,6 +74,7 @@ class NapCatConfig:
     napcat_deployment: str = "docker"  # docker | bare | remote
     napcat_container: str = "napcat"   # container name (docker) or service name (bare)
     napcat_root: str = "/app/napcat"   # NapCat install root inside container/host
+    napcat_quick_password: str = ""  # QQ password for NapCat ACCOUNT + NAPCAT_QUICK_PASSWORD env
     # TUI settings
     tui_show_images: bool = True
 

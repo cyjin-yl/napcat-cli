@@ -991,6 +991,7 @@ def cmd_config(args: argparse.Namespace, api: NapCatAPI) -> int:
             ("napcat_deployment", cfg.napcat_deployment),
             ("napcat_container", cfg.napcat_container),
             ("napcat_root", cfg.napcat_root),
+            ("napcat_quick_password", "(set)" if cfg.napcat_quick_password else ""),
         ]
         for key, val in items:
             print(f"{key}: {val}")
@@ -1373,6 +1374,143 @@ def _auth_quick_login(args: argparse.Namespace, api: NapCatAPI) -> int:
         print("Warning: could not auto-restart NapCat.", file=sys.stderr)
         print("Restart manually: docker restart napcat  OR  sudo systemctl restart napcat", file=sys.stderr)
 
+    return 0
+
+
+def _auth_set_password(args: argparse.Namespace, api: NapCatAPI) -> int:
+    """Save QQ password to config for auto quick-login via container env."""
+    qq = args.qq.strip()
+    pwd = args.password
+    if not qq.isdigit():
+        print(f"Error: QQ must be a number, got {qq!r}", file=sys.stderr)
+        return 1
+    cfg = get_config()
+    cfg.napcat_quick_password = pwd
+    try:
+        cfg.save()
+    except Exception as e:
+        print(f"Error: could not save config: {e}", file=sys.stderr)
+        return 1
+    # Password stored in config.json (gitignored user-state file, NOT in repo)
+    print(f"Password saved for QQ {qq}.", file=sys.stderr)
+    print(f"To apply: run 'napcat auth recreate' to recreate container with", file=sys.stderr)
+    print(f"ACCOUNT={qq} + NAPCAT_QUICK_PASSWORD env vars.", file=sys.stderr)
+    return 0
+
+
+def _get_container_spec() -> dict | None:
+    """Inspect current container and return spec for recreation."""
+    import subprocess
+    cfg = get_config()
+    container = cfg.napcat_container or "napcat"
+    try:
+        r = subprocess.run(
+            ["docker", "inspect", container,
+             "--format", "{{json .Config.Image}}\t{{json .HostConfig.Binds}}\t{{json .HostConfig.PortBindings}}\t{{.HostConfig.RestartPolicy.Name}}\t{{.HostConfig.NetworkMode}}"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if r.returncode != 0:
+            # try sudo
+            r = subprocess.run(
+                ["sudo", "-n", "docker", "inspect", container,
+                 "--format", "{{json .Config.Image}}\t{{json .HostConfig.Binds}}\t{{json .HostConfig.PortBindings}}\t{{.HostConfig.RestartPolicy.Name}}\t{{.HostConfig.NetworkMode}}"],
+                capture_output=True, text=True, timeout=10,
+            )
+        if r.returncode != 0:
+            return None
+        parts = r.stdout.strip().split("\t")
+        return {
+            "image": json.loads(parts[0]),
+            "binds": json.loads(parts[1]),
+            "ports": json.loads(parts[2]),
+            "restart": parts[3],
+            "network": parts[4],
+        }
+    except Exception:
+        return None
+
+
+def _auth_recreate_container(args: argparse.Namespace, api: NapCatAPI) -> int:
+    """Recreate the NapCat Docker container with ACCOUNT + NAPCAT_QUICK_PASSWORD.
+
+    Reads current container spec (image, volumes, ports, restart policy) and
+    recreates it with password env vars added. Requires:
+    - cfg.self_id or cfg.napcat_container for ACCOUNT
+    - cfg.napcat_quick_password for NAPCAT_QUICK_PASSWORD
+
+    Password is only stored in ~/.napcat-data/config.json (gitignored user
+    state) and passed as a Docker env var at container creation time. It is
+    NEVER written to any tracked file.
+    """
+    import subprocess
+    cfg = get_config()
+    container = cfg.napcat_container or "napcat"
+
+    qq = str(cfg.self_id or "").strip()
+    pwd = cfg.napcat_quick_password or ""
+
+    if not qq or qq in ("0", "12345"):
+        print("Error: self_id not set. Run 'napcat status' first to detect it.", file=sys.stderr)
+        return 1
+    if not pwd:
+        print("Error: napcat_quick_password not set.", file=sys.stderr)
+        print("Run: napcat auth set-password <QQ> <password>", file=sys.stderr)
+        return 1
+
+    spec = _get_container_spec()
+    if not spec:
+        print(f"Error: could not inspect container '{container}'.", file=sys.stderr)
+        print("Is NapCat running in Docker? Check container name in config.", file=sys.stderr)
+        return 1
+
+    print(f"Recreating container '{container}' with ACCOUNT={qq} + password...", file=sys.stderr)
+
+    # Build docker run command
+    cmd = ["docker", "run", "-d",
+           "--name", container,
+           "--restart", spec["restart"],
+           "-e", f"ACCOUNT={qq}",
+           "-e", f"NAPCAT_QUICK_PASSWORD={pwd}",
+           "-e", "TZ=Asia/Shanghai"]
+
+    for bind in spec.get("binds") or []:
+        cmd += ["-v", bind]
+
+    ports = spec.get("ports") or {}
+    for container_port, mappings in ports.items():
+        for m in mappings:
+            host = m.get("HostPort", "")
+            cp = container_port.split("/")[0]
+            cmd += ["-p", f"{host}:{cp}"]
+
+    cmd.append(spec["image"])
+
+    # Stop and remove old container
+    for stop_cmd in (["docker", "stop", container], ["docker", "rm", container]):
+        try:
+            subprocess.run(stop_cmd, capture_output=True, text=True, timeout=30)
+        except Exception:
+            pass
+        # sudo fallback
+        try:
+            subprocess.run(["sudo", "-n"] + stop_cmd, capture_output=True, text=True, timeout=30)
+        except Exception:
+            pass
+
+    # Create new container
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        if r.returncode != 0:
+            r = subprocess.run(["sudo", "-n"] + cmd, capture_output=True, text=True, timeout=60)
+        if r.returncode != 0:
+            print(f"Error: docker run failed: {r.stderr}", file=sys.stderr)
+            return 1
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+    print(f"Container recreated. NapCat will auto quick-login as {qq}.", file=sys.stderr)
+    print("Check: napcat status (may take 15-30s to come online)", file=sys.stderr)
     return 0
 
 
