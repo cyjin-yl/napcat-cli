@@ -1179,16 +1179,26 @@ def _auth_qr(args: argparse.Namespace, api: NapCatAPI) -> int:
     import os
     import re
 
-    # Check if bot is already online
+    # Check if bot is truly online (not just the NapCat process being alive).
+    # get_login_info returns user_id even when the QQ session is KickedOffLine;
+    # only get_status online:true means the bot can actually send/receive.
     try:
         login = api.call("get_login_info", timeout=3)
         if login.get("retcode") == 0 and login.get("data", {}).get("user_id"):
             uid = login["data"]["user_id"]
             nick = login["data"].get("nickname", "")
-            print(f"Bot is already online: {nick} ({uid})", file=sys.stderr)
-            print("No QR code needed.", file=sys.stderr)
-            return 0
+            # Verify online status — KickedOffLine still answers get_login_info
+            status = api.call("get_status", timeout=3)
+            online = (status.get("data") or {}).get("online", False)
+            if online:
+                print(f"Bot is online: {nick} ({uid})", file=sys.stderr)
+                print("No QR code needed.", file=sys.stderr)
+                return 0
+            else:
+                print(f"Bot is logged in as {nick} ({uid}) but status=offline.", file=sys.stderr)
+                print("QQ session may have been kicked. Proceeding to fetch QR...", file=sys.stderr)
     except Exception:
+        # OneBot API unreachable — NapCat process probably down, need QR
         pass
 
     qr_path = "/tmp/napcat-login-qr.png"
