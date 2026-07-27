@@ -1064,7 +1064,13 @@ def cmd_auth(args: argparse.Namespace, api: NapCatAPI) -> int:
     if sub == "quick-login":
         return _auth_quick_login(args, api)
 
-    print(f"Unknown auth command: {sub}. Use: status, qr, quick-login", file=sys.stderr)
+    if sub == "set-password":
+        return _auth_set_password(args, api)
+
+    if sub == "recreate":
+        return _auth_recreate_container(args, api)
+
+    print(f"Unknown auth command: {sub}. Use: status, qr, quick-login, set-password, recreate", file=sys.stderr)
     return 1
 
 
@@ -2551,8 +2557,11 @@ def main() -> int:
     auth_p = subparsers.add_parser("auth", help="Login status, QR code, quick login")
     auth_sub = auth_p.add_subparsers(dest="subcommand")
     auth_sub.add_parser("qr", help="Fetch login QR code from container")
-    ql = auth_sub.add_parser("quick-login", help="Set autoLoginAccount and restart container")
     ql.add_argument("qq", help="QQ number for quick login")
+    sp = auth_sub.add_parser("set-password", help="Save QQ password for auto quick-login")
+    sp.add_argument("qq", help="QQ number")
+    sp.add_argument("password", help="QQ password")
+    auth_sub.add_parser("recreate", help="Recreate container with ACCOUNT+PASSWORD env")
 
     # --- ocr ---
     ocr_p = subparsers.add_parser("ocr", help="OCR an image")
