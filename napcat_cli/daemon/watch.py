@@ -367,6 +367,21 @@ class EventProcessor:
         notice_type = event.get("notice_type", "")
         sub_type = event.get("sub_type", "")
 
+        # Enrich: notice events (poke/ban/admin/etc.) lack a "sender" dict.
+        # Add one so identity resolution and wake prompts get nicknames.
+        if "sender" not in event:
+            uid = event.get("user_id") or event.get("operator_id")
+            gid = event.get("group_id")
+            if uid:
+                # Try to get nickname from group member info (best-effort, cached)
+                from napcat_cli.lib.identity import resolve_person
+                info = resolve_person(uid, group_id=gid)
+                event["sender"] = {
+                    "user_id": uid,
+                    "nickname": info.get("nickname", ""),
+                    "card": info.get("card", ""),
+                }
+
         # --- notify events (poke, profile_like, lucky_king) ---
         if notice_type == "notify":
             self._handle_notify(event, sub_type)
