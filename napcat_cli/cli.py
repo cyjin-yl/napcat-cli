@@ -1106,7 +1106,12 @@ def _read_napcat_file(rel_path: str) -> str | None:
 
 
 def _read_napcat_logs_tail(n: int = 50) -> str:
-    """Read NapCat logs from config-specified deployment."""
+    """Read NapCat logs from config-specified deployment.
+
+    Docker:  docker logs --tail
+    Bare:    journalctl -u <service> + fallback to log files
+    """
+    import subprocess
     cfg = get_config()
 
     if cfg.napcat_deployment == "docker":
@@ -1114,9 +1119,33 @@ def _read_napcat_logs_tail(n: int = 50) -> str:
         if ok:
             return out
     else:
+        # 1. journalctl (systemd service)
+        svc = cfg.napcat_container or "napcat"
+        try:
+            r = subprocess.run(
+                ["journalctl", "-u", svc, "--no-pager", "-n", str(n)],
+                capture_output=True, text=True, timeout=5,
+            )
+            if r.returncode == 0 and r.stdout:
+                return r.stdout
+        except Exception:
+            pass
+
+        # 2. Also try sudo journalctl
+        try:
+            r = subprocess.run(
+                ["sudo", "-n", "journalctl", "-u", svc, "--no-pager", "-n", str(n)],
+                capture_output=True, text=True, timeout=5,
+            )
+            if r.returncode == 0 and r.stdout:
+                return r.stdout
+        except Exception:
+            pass
+
+        # 3. Fallback: read from NapCat log directory
         root = cfg.napcat_root or "/app/napcat"
+        import glob
         for log_rel in ("logs", "log"):
-            import glob
             log_dir = os.path.join(root, log_rel)
             if os.path.isdir(log_dir):
                 files = sorted(glob.glob(os.path.join(log_dir, "*.log")), reverse=True)
@@ -1255,23 +1284,6 @@ def _auth_qr(args: argparse.Namespace, api: NapCatAPI) -> int:
         if os.path.exists(qr_path) and os.path.getsize(qr_path) > 100:
             print(f"QR image also saved: {qr_path}", file=sys.stderr)
             found = True
-
-    # 4. Bare-metal journalctl fallback
-    if not found:
-        try:
-            import subprocess
-            r = subprocess.run(
-                ["journalctl", "-u", "napcat", "--no-pager", "-n", "100"],
-                capture_output=True, text=True, timeout=5,
-            )
-            if r.returncode == 0:
-                urls = re.findall(r"https://txz\.qq\.com/p\?k=\S+", r.stdout)
-                if urls:
-                    print("QR decode URL from journalctl:", file=sys.stderr)
-                    print(urls[-1].strip())
-                    found = True
-        except Exception:
-            pass
 
     if not found:
         print("Error: no QR code found. NapCat may not be running, already logged in,", file=sys.stderr)
