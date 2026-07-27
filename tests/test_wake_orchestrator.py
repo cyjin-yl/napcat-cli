@@ -152,3 +152,20 @@ class TestOrchestration:
         o.note_new_message(time.time())  # fresh
         assert o.maybe_backlog_sweep() is False
         assert fk.calls == []
+
+
+def test_notice_reasons_are_immediate(tmp_path):
+    """BOT_BANNED / NEW_FRIEND / NEW_REQUEST etc. must bypass cooldown."""
+    from napcat_cli.wake_orchestrator import _IMMEDIATE
+    for r in ("AT_ME", "REPLY_TO_ME", "DM_ME", "BOT_BANNED",
+              "BOT_KICKED_FROM_GROUP", "NEW_FRIEND", "NEW_REQUEST",
+              "BOT_OFFLINE", "GROUP_ADMIN_CHANGE", "MY_MESSAGE_RECALLED"):
+        assert r in _IMMEDIATE, f"{r} should be in _IMMEDIATE"
+
+
+def test_backlog_is_not_immediate():
+    """NEW_MESSAGE_BACKLOG must NOT be immediate — it's debounced/firehose."""
+    from napcat_cli.wake_orchestrator import _IMMEDIATE
+    assert "NEW_MESSAGE_BACKLOG" not in _IMMEDIATE
+    assert "NEW_MESSAGE" not in _IMMEDIATE
+    assert "NEW_POKE" not in _IMMEDIATE

@@ -7,9 +7,11 @@ thread so the loop never blocks, and adds:
 
 - **Debounce**: a burst of same-reason events within ``debounce_seconds``
   coalesces into one wake.
-- **Cooldown**: per-reason ``cooldown_seconds`` suppresses repeats. ``AT_ME``,
-  ``REPLY_TO_ME`` and ``DM_ME`` bypass cooldown (near-immediate wake) so direct
-  mentions and private (DM) messages are answered promptly.
+- **Cooldown**: per-reason ``cooldown_seconds`` suppresses repeats. All
+  interactive reasons (``_IMMEDIATE``: AT/DM/REPLY + bans/kicks/admin/friends/
+  requests/offline/recalls) bypass cooldown for near-immediate notification.
+  Only generic ``NEW_MESSAGE`` / ``GROUP_TRIGGER`` / ``NEW_POKE`` are debounced
+  and cooldown-bounded — those are "firehose" reasons that don't need urgency.
 - **NEW_MESSAGE backlog sweep**: if unread messages accumulate longer than
   ``new_message_idle_seconds`` without a wake, fire a ``NEW_MESSAGE_BACKLOG``
   wake so the agent scans the inbox.
@@ -32,7 +34,17 @@ if TYPE_CHECKING:
 
 
 # Reasons that should wake near-immediately and ignore cooldown.
-_IMMEDIATE = {"AT_ME", "REPLY_TO_ME", "DM_ME"}
+_IMMEDIATE = {
+    "AT_ME", "REPLY_TO_ME", "DM_ME",
+    # Notice/event reasons that must notify immediately (not debounced/cooldown):
+    "BOT_BANNED",           # bot was muted/banned in a group
+    "BOT_KICKED_FROM_GROUP",  # bot was removed from a group
+    "GROUP_ADMIN_CHANGE",    # bot's admin status changed
+    "MY_MESSAGE_RECALLED",   # bot's own message was recalled
+    "NEW_FRIEND",            # someone added the bot as friend
+    "NEW_REQUEST",           # friend/group join request
+    "BOT_OFFLINE",           # connection lost
+}
 # Message-class reasons — a wake for any of these counts as "the agent read the inbox".
 _MESSAGE_REASONS = {"AT_ME", "REPLY_TO_ME", "DM_ME", "NEW_MESSAGE", "NEW_MESSAGE_BACKLOG",
                     "GROUP_TRIGGER", "PRIVATE_TRIGGER"}
@@ -85,10 +97,16 @@ _MUST_REPLY_POLICY = (
 )
 
 _OPTIONAL_REPLY_POLICY = (
-    "\n[可选回复策略 — 非 AT/DM/REPLY]"
-    "\n本轮是登记类/积压/通知类唤醒（如 NEW_MESSAGE_BACKLOG、NEW_POKE、NEW_FRIEND、群管理通知等）："
-    "先扫一眼上下文，**可以不接、不回复**；只有你判断需要介入时再 send/reply。"
-    "无新信息或纯噪音时直接 `napcat alerts --clear` 后结束本轮即可。"
+    "\n[可选回复策略 — 非直接交互]"
+    "\n本轮不是 @ / 私聊 / 回复，而是通知/积压/事件类唤醒（如 NEW_MESSAGE_BACKLOG、"
+    "NEW_POKE、群管理变动、被禁言、新好友/请求等）。"
+    "\n- 这些事件已**立即通知**你（不等积压），但回复**可选**。"
+    "\n- 只有 NEW_MESSAGE / NEW_MESSAGE_BACKLOG 是积压防抖的——那些可能批量来，"
+    "扫一眼后大部分可以忽略。"
+    "\n- 通知类（被禁言/被踢/管理员变动/新好友/请求）：**必须读完并知悉**，"
+    "但不必在 QQ 回复（对方不一定在等）。如果需要主动行动（如同意好友请求、"
+    "向其他平台报告被封）则调用 napcat 工具。"
+    "\n- 纯噪音消息（群刷屏、无关 @）：直接 `napcat alerts --clear` 后结束。"
 )
 
 
