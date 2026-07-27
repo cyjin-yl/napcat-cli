@@ -2556,6 +2556,7 @@ def main() -> int:
     # --- auth ---
     auth_p = subparsers.add_parser("auth", help="Login status, QR code, quick login")
     auth_sub = auth_p.add_subparsers(dest="subcommand")
+    auth_sub.add_parser("qr", help="Fetch login QR code (ASCII art + URL + image)")
     ql = auth_sub.add_parser("quick-login", help="Set autoLoginAccount and restart container")
     ql.add_argument("qq", help="QQ number for quick login")
     sp = auth_sub.add_parser("set-password", help="Save QQ password for auto quick-login")
